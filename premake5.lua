@@ -18,4 +18,4 @@ workspace "PathtracingVulkan"
 
     -- Include subdirectories
     include "extern/premake5.lua"
-    include "source/premake5.lua"
+    include "pathtracer/premake5.lua"

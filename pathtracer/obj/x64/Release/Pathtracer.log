@@ -1,0 +1,13 @@
+﻿  main.cpp
+C:\VulkanSDK\1.4.304.0\Include\vulkan\vulkan_structs.hpp(28733,7): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+  (compiling source file 'source/main.cpp')
+  
+C:\VulkanSDK\1.4.304.0\Include\vulkan\vulkan_structs.hpp(28761,7): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+  (compiling source file 'source/main.cpp')
+  
+C:\Users\Hekbas\CITM\5_TFG\Pathtracing-Vulkan\pathtracer\source\main.cpp(114,27): warning C4101: 'det': unreferenced local variable
+C:\Users\Hekbas\CITM\5_TFG\Pathtracing-Vulkan\pathtracer\source\main.cpp(114,18): warning C4101: 'inv': unreferenced local variable
+C:\Users\Hekbas\CITM\5_TFG\Pathtracing-Vulkan\pathtracer\source\main.cpp(708,34): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+C:\Users\Hekbas\CITM\5_TFG\Pathtracing-Vulkan\pathtracer\source\main.cpp(708,25): warning C4244: 'argument': conversion from 'double' to 'float', possible loss of data
+C:\Users\Hekbas\CITM\5_TFG\Pathtracing-Vulkan\pathtracer\source\main.cpp(922,28): warning C4244: 'initializing': conversion from 'double' to 'float', possible loss of data
+  Pathtracer.vcxproj -> C:\Users\Hekbas\CITM\5_TFG\Pathtracing-Vulkan\pathtracer\bin\x64\Release\Pathtracer.exe

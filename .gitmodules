@@ -1,0 +1,6 @@
+[submodule "extern/source/glfw"]
+	path = extern/source/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "extern/source/tinyobjloader"]
+	path = extern/source/tinyobjloader
+	url = https://github.com/tinyobjloader/tinyobjloader.git

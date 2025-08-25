@@ -7,40 +7,40 @@ project "glfw"
     
     -- Common files for all platforms
     files {
-        "glfw/include/GLFW/glfw3.h",
-        "glfw/include/GLFW/glfw3native.h",
+        "source/glfw/include/GLFW/glfw3.h",
+        "source/glfw/include/GLFW/glfw3native.h",
         
         -- Core source files
-        "glfw/src/context.c",
-        "glfw/src/init.c",
-        "glfw/src/input.c",
-        "glfw/src/monitor.c",
-        "glfw/src/platform.c",
-        "glfw/src/vulkan.c",
-        "glfw/src/window.c",
+        "source/glfw/src/context.c",
+        "source/glfw/src/init.c",
+        "source/glfw/src/input.c",
+        "source/glfw/src/monitor.c",
+        "source/glfw/src/platform.c",
+        "source/glfw/src/vulkan.c",
+        "source/glfw/src/window.c",
         
         -- Platform abstraction layer
-        "glfw/src/internal.h",
+        "source/glfw/src/internal.h",
         
         -- Null backend (fallback)
-        "glfw/src/null_*.c",
-        "glfw/src/null_*.h"
+        "source/glfw/src/null_*.c",
+        "source/glfw/src/null_*.h"
     }
     
     includedirs {
-        "glfw/include",
-        "glfw/src"  -- Add src directory for internal headers
+        "source/glfw/include",
+        "source/glfw/src"  -- Add src directory for internal headers
     }
     
     -- Windows-specific files
     filter "system:windows"
         files {
             -- Win32 platform implementation
-            "glfw/src/win32_*.c",
-            "glfw/src/win32_*.h",
-            "glfw/src/wgl_context.c",
-            "glfw/src/egl_context.c",
-            "glfw/src/osmesa_context.c"
+            "source/glfw/src/win32_*.c",
+            "source/glfw/src/win32_*.h",
+            "source/glfw/src/wgl_context.c",
+            "source/glfw/src/egl_context.c",
+            "source/glfw/src/osmesa_context.c"
         }
         defines { 
             "_GLFW_WIN32",
@@ -51,17 +51,17 @@ project "glfw"
     filter "system:linux"
         files {
             -- X11 platform implementation
-            "glfw/src/x11_*.c",
-            "glfw/src/x11_*.h",
-            "glfw/src/xkb_*.c",
-            "glfw/src/xkb_*.h",
-            "glfw/src/posix_*.c",
-            "glfw/src/posix_*.h",
-            "glfw/src/linux_*.c",
-            "glfw/src/linux_*.h",
-            "glfw/src/glx_context.c",
-            "glfw/src/egl_context.c",
-            "glfw/src/osmesa_context.c"
+            "source/glfw/src/x11_*.c",
+            "source/glfw/src/x11_*.h",
+            "source/glfw/src/xkb_*.c",
+            "source/glfw/src/xkb_*.h",
+            "source/glfw/src/posix_*.c",
+            "source/glfw/src/posix_*.h",
+            "source/glfw/src/linux_*.c",
+            "source/glfw/src/linux_*.h",
+            "source/glfw/src/glx_context.c",
+            "source/glfw/src/egl_context.c",
+            "source/glfw/src/osmesa_context.c"
         }
         defines { "_GLFW_X11" }
     
@@ -69,14 +69,14 @@ project "glfw"
     filter "system:macosx"
         files {
             -- Cocoa platform implementation
-            "glfw/src/cocoa_*.m",
-            "glfw/src/cocoa_*.c",
-            "glfw/src/cocoa_*.h",
-            "glfw/src/posix_*.c",
-            "glfw/src/posix_*.h",
-            "glfw/src/nsgl_context.m",
-            "glfw/src/egl_context.c",
-            "glfw/src/osmesa_context.c"
+            "source/glfw/src/cocoa_*.m",
+            "source/glfw/src/cocoa_*.c",
+            "source/glfw/src/cocoa_*.h",
+            "source/glfw/src/posix_*.c",
+            "source/glfw/src/posix_*.h",
+            "source/glfw/src/nsgl_context.m",
+            "source/glfw/src/egl_context.c",
+            "source/glfw/src/osmesa_context.c"
         }
         defines { "_GLFW_COCOA" }
     
@@ -89,10 +89,10 @@ project "tinyobjloader"
     cppdialect "C++11"
     
     files {
-        "tinyobjloader/tiny_obj_loader.h",
-        "tinyobjloader/tiny_obj_loader.cc"
+        "source/tinyobjloader/tiny_obj_loader.h",
+        "source/tinyobjloader/tiny_obj_loader.cc"
     }
     
     includedirs {
-        "tinyobjloader"
+        "source/tinyobjloader"
     }
