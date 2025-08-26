@@ -1,4 +1,5 @@
 
+#include <map>
 #include <cmath>
 #include <string>
 #include <fstream>
@@ -17,8 +18,8 @@
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
-static constexpr int WIDTH = 1024;
-static constexpr int HEIGHT = 1024;
+static constexpr int WIDTH = 1280;
+static constexpr int HEIGHT = 720;
 
 
 // ------------------------------------------------------------------
@@ -129,11 +130,13 @@ inline Mat4 inverse(const Mat4& mat) {
 struct Vertex {
     Vec3 position;
     Vec3 normal;
+    float texCoord[2];
 };
 
 struct Face {
     float diffuse[3];
     float emission[3];
+    int diffuseTextureID;
 };
 
 Vec3 calcNormal(Vec3 v0, Vec3 v1, Vec3 v2) {
@@ -142,90 +145,108 @@ Vec3 calcNormal(Vec3 v0, Vec3 v1, Vec3 v2) {
     return normalize(cross(e01, e02));
 }
 
-void loadFromFile(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices, std::vector<Face>& faces) {
+void loadFromFile(
+    std::vector<Vertex>& vertices,
+    std::vector<uint32_t>& indices,
+    std::vector<Face>& faces,
+    std::vector<std::string>& textureFiles,
+    const std::string& modelPath)
+{
+    // Clear output vectors
+    vertices.clear();
+    indices.clear();
+    faces.clear();
+    textureFiles.clear();
+
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;
     std::vector<tinyobj::material_t> materials;
     std::string warn, err;
 
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, "../assets/models/CornellBox-Original.obj", "../assets/models")) {
-        throw std::runtime_error(warn + err);
+    // Assumes materials are in a subfolder named "materials" relative to the model path
+    std::string modelDir = modelPath.substr(0, modelPath.find_last_of("/\\") + 1);
+
+    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, modelPath.c_str(), modelDir.c_str())) {
+        throw std::runtime_error("TinyObjLoader: " + warn + err);
     }
 
-    /*if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, "../assets/models/sponza.obj", "../assets/models")) {
-        throw std::runtime_error(warn + err);
-    }*/
+    // A map to store unique texture paths and their assigned index
+    std::map<std::string, int> textureMap;
+    for (const auto& material : materials) {
+        if (!material.diffuse_texname.empty()) {
+            if (textureMap.find(material.diffuse_texname) == textureMap.end()) {
+                int textureId = static_cast<int>(textureFiles.size());
+                textureMap[material.diffuse_texname] = textureId;
+                textureFiles.push_back(modelDir + material.diffuse_texname);
+            }
+        }
+    }
 
+    // Process each shape in the model
     for (const auto& shape : shapes) {
-        std::vector<Vertex> shapeVertices;
-        std::vector<uint32_t> shapeIndices;
+        // A face in tinyobjloader is a polygon. We assume triangles.
+        size_t index_offset = 0;
+        for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
+            size_t num_verts_in_face = shape.mesh.num_face_vertices[f];
 
-        // First pass: load all vertices for this shape
-        for (const auto& index : shape.mesh.indices) {
-            Vertex vertex{};
-            vertex.position.x = attrib.vertices[3 * index.vertex_index + 0];
-            vertex.position.y = -attrib.vertices[3 * index.vertex_index + 1];  // Flipping Y-axis
-            vertex.position.z = attrib.vertices[3 * index.vertex_index + 2];
-
-            // Load normals if available
-            if (!attrib.normals.empty() && index.normal_index >= 0) {
-                vertex.normal.x = attrib.normals[3 * index.normal_index + 0];
-                vertex.normal.y = -attrib.normals[3 * index.normal_index + 1];  // Flip Y to match position
-                vertex.normal.z = attrib.normals[3 * index.normal_index + 2];
-            } else {
-                // Initialize to zero - will be calculated later
-                vertex.normal = Vec3();
+            if (num_verts_in_face != 3) {
+                // This logic only supports triangles, so we skip non-triangle faces.
+                index_offset += num_verts_in_face;
+                continue;
             }
 
-            shapeVertices.push_back(vertex);
-            shapeIndices.push_back(static_cast<uint32_t>(shapeIndices.size()));
-        }
+            // Get the material for this face
+            Face current_face{};
+            int material_id = shape.mesh.material_ids[f];
 
-        // Calculate normals if they weren't provided in the file
-        if (attrib.normals.empty()) {
-            for (size_t i = 0; i < shapeIndices.size(); i += 3) {
-                uint32_t i0 = shapeIndices[i];
-                uint32_t i1 = shapeIndices[i + 1];
-                uint32_t i2 = shapeIndices[i + 2];
+            if (material_id >= 0) {
+                const auto& mat = materials[material_id];
+                current_face.diffuse[0] = mat.diffuse[0];
+                current_face.diffuse[1] = mat.diffuse[1];
+                current_face.diffuse[2] = mat.diffuse[2];
+                current_face.emission[0] = mat.emission[0];
+                current_face.emission[1] = mat.emission[1];
+                current_face.emission[2] = mat.emission[2];
 
-                Vertex& v0 = shapeVertices[i0];
-                Vertex& v1 = shapeVertices[i1];
-                Vertex& v2 = shapeVertices[i2];
-
-                Vec3 faceNormal = calcNormal(v0.position, v1.position, v2.position);
-
-                // Accumulate face normal to each vertex
-                v0.normal += faceNormal;
-                v1.normal += faceNormal;
-                v2.normal += faceNormal;
-            }
-
-            // Normalize all vertex normals for smooth shading
-            /*for (auto& vertex : shapeVertices) {
-                if (glm::length(vertex.normal) > 0.0f) {
-                    vertex.normal = normalize(vertex.normal);
+                if (!mat.diffuse_texname.empty()) {
+                    current_face.diffuseTextureID = textureMap.at(mat.diffuse_texname);
                 }
-            }*/
-        }
+                else {
+                    current_face.diffuseTextureID = -1;
+                }
+            }
+            else {
+                // Default material if none is assigned
+                current_face.diffuse[0] = 0.8f; current_face.diffuse[1] = 0.8f; current_face.diffuse[2] = 0.8f;
+                current_face.emission[0] = 0.0f; current_face.emission[1] = 0.0f; current_face.emission[2] = 0.0f;
+                current_face.diffuseTextureID = -1;
+            }
+            faces.push_back(current_face);
 
-        // Add the processed vertices and indices to the main arrays
-        size_t indexOffset = vertices.size();
-        vertices.insert(vertices.end(), shapeVertices.begin(), shapeVertices.end());
+            // Process the 3 vertices for this triangle
+            for (size_t v = 0; v < 3; ++v) {
+                tinyobj::index_t idx = shape.mesh.indices[index_offset + v];
+                Vertex vertex{};
 
-        for (const auto& index : shapeIndices) {
-            indices.push_back(static_cast<uint32_t>(index + indexOffset));
-        }
+                vertex.position.x = attrib.vertices[3 * idx.vertex_index + 0];
+                vertex.position.y = attrib.vertices[3 * idx.vertex_index + 1];
+                vertex.position.z = attrib.vertices[3 * idx.vertex_index + 2];
 
-        // Process materials for faces
-        for (const auto& matIndex : shape.mesh.material_ids) {
-            Face face;
-            face.diffuse[0] = materials[matIndex].diffuse[0];
-            face.diffuse[1] = materials[matIndex].diffuse[1];
-            face.diffuse[2] = materials[matIndex].diffuse[2];
-            face.emission[0] = materials[matIndex].emission[0];
-            face.emission[1] = materials[matIndex].emission[1];
-            face.emission[2] = materials[matIndex].emission[2];
-            faces.push_back(face);
+                if (idx.normal_index >= 0) {
+                    vertex.normal.x = attrib.normals[3 * idx.normal_index + 0];
+                    vertex.normal.y = attrib.normals[3 * idx.normal_index + 1];
+                    vertex.normal.z = attrib.normals[3 * idx.normal_index + 2];
+                }
+
+                if (idx.texcoord_index >= 0) {
+                    vertex.texCoord[0] = attrib.texcoords[2 * idx.texcoord_index + 0];
+                    vertex.texCoord[1] = 1.0f - attrib.texcoords[2 * idx.texcoord_index + 1];
+                }
+
+                vertices.push_back(vertex);
+                indices.push_back(static_cast<uint32_t>(indices.size()));
+            }
+            index_offset += num_verts_in_face;
         }
     }
 }
@@ -445,6 +466,7 @@ struct Buffer {
         AccelInput,
         AccelStorage,
         ShaderBindingTable,
+        TransferSrc,
     };
 
     Buffer() = default;
@@ -464,6 +486,9 @@ struct Buffer {
             memoryProps = Memory::eDeviceLocal;
         } else if (type == Type::ShaderBindingTable) {
             usage = Usage::eShaderBindingTableKHR | Usage::eShaderDeviceAddress;
+            memoryProps = Memory::eHostVisible | Memory::eHostCoherent;
+        } else if (type == Type::TransferSrc) {
+            usage = Usage::eTransferSrc;
             memoryProps = Memory::eHostVisible | Memory::eHostCoherent;
         }
 
@@ -506,7 +531,12 @@ struct Buffer {
 
 struct Image {
     Image() = default;
-    Image(const Context& context, vk::Extent2D extent, vk::Format format, vk::ImageUsageFlags usage) {
+    Image(const Context& context,
+        vk::Extent2D extent,
+        vk::Format format,
+        vk::ImageUsageFlags usage,
+        vk::ImageLayout finalLayout = vk::ImageLayout::eGeneral)
+    {
         // Create image
         vk::ImageCreateInfo imageInfo;
         imageInfo.setImageType(vk::ImageType::e2D);
@@ -538,10 +568,14 @@ struct Image {
 
         // Set image info
         descImageInfo.setImageView(*view);
-        descImageInfo.setImageLayout(vk::ImageLayout::eGeneral);
-        context.oneTimeSubmit([&](vk::CommandBuffer commandBuffer) {  //
-            setImageLayout(commandBuffer, *image, vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral);
-        });
+        descImageInfo.setImageLayout(finalLayout);
+
+        // Only transition the layout if a specific final layout is requested
+        if (finalLayout != vk::ImageLayout::eUndefined) {
+            context.oneTimeSubmit([&](vk::CommandBuffer commandBuffer) {
+                setImageLayout(commandBuffer, *image, vk::ImageLayout::eUndefined, finalLayout);
+                });
+        }
     }
 
     static vk::AccessFlags toAccessFlags(vk::ImageLayout layout) {
@@ -582,6 +616,11 @@ struct Image {
     vk::UniqueImageView view;
     vk::UniqueDeviceMemory memory;
     vk::DescriptorImageInfo descImageInfo;
+};
+
+struct Texture {
+    Image image;
+    vk::UniqueSampler sampler;
 };
 
 struct Accel {
@@ -628,16 +667,15 @@ struct Accel {
 };
 
 struct Camera {
-    Vec3 position = {0.0f, 1.0f, 5.0f};
-    Vec3 front = {0.0f, 0.0f, -1.0f};
-    Vec3 up = {0.0f, 1.0f, 0.0f};
-    Vec3 right = {1.0f, 0.0f, 0.0f};
-    Vec3 worldUp = {0.0f, 1.0f, 0.0f};
+    Vec3 position = { 0.0f, 100.0f, 0.0f };
+    Vec3 front = { 0.0f, 0.0f, -1.0f };
+    Vec3 up = { 0.0f, -1.0f, 0.0f };
+    Vec3 right = { 1.0f, 0.0f, 0.0f };
+    Vec3 worldUp = { 0.0f, -1.0f, 0.0f };
 
-    float yaw = -90.0f;
+    float yaw = 0.0f;
     float pitch = 0.0f;
-
-    float speed = 100.0f;
+    float speed = 50.0f;
     float sensitivity = 0.1f;
 
     void updateCameraVectors() {
@@ -647,30 +685,29 @@ struct Camera {
         newFront.z = sin(yaw * PI / 180.0f) * cos(pitch * PI / 180.0f);
         front = normalize(newFront);
 
-        right = normalize(cross(front, worldUp));
-        up = normalize(cross(right, front));
+        // For right-handed coordinate system (Vulkan)
+        right = normalize(cross(worldUp, front));  // worldUp x front gives right
+        up = normalize(cross(front, right));       // front x right gives up
     }
 
     void processKeyboard(const std::string& direction, float deltaTime) {
         float velocity = speed * deltaTime;
-        if (direction == "FORWARD")
-            position = position + front * velocity;
-        if (direction == "BACKWARD")
-            position = position - front * velocity;
-        if (direction == "LEFT")
-            position = position - right * velocity;
-        if (direction == "RIGHT")
-            position = position + right * velocity;
+        if (direction == "FORWARD")  position += front * velocity;
+        if (direction == "BACKWARD") position -= front * velocity;
+        if (direction == "LEFT")     position -= right * velocity;
+        if (direction == "RIGHT")    position += right * velocity;
     }
 
     void processMouse(float xoffset, float yoffset) {
-        yaw += xoffset * sensitivity;
-        pitch -= yoffset * sensitivity;
+        xoffset *= sensitivity;
+        yoffset *= sensitivity;
 
-        if (pitch > 89.0f)
-            pitch = 89.0f;
-        if (pitch < -89.0f)
-            pitch = -89.0f;
+        yaw += xoffset;
+        pitch += yoffset;
+
+        // Constrain pitch to avoid gimbal lock
+        if (pitch > 89.0f) pitch = 89.0f;
+        if (pitch < -89.0f) pitch = -89.0f;
 
         updateCameraVectors();
     }
@@ -687,6 +724,70 @@ struct PushConstants {
     float pad6;
     Vec3 cameraRight;
 };
+
+Texture createTexture(const Context& context, const std::string& path) {
+    // 1. Load image pixels from file using stb_image
+    int texWidth, texHeight, texChannels;
+    stbi_uc* pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    if (!pixels) {
+        throw std::runtime_error("Failed to load texture image: " + path);
+    }
+    vk::DeviceSize imageSize = texWidth * texHeight * 4;
+
+    // 2. Use your existing Buffer struct to create a staging buffer
+    Buffer stagingBuffer(context, Buffer::Type::TransferSrc, imageSize, pixels);
+    stbi_image_free(pixels); // We can now free the CPU-side pixels
+
+    // 3. Create the destination GPU image
+    vk::Extent2D extent = { (uint32_t)texWidth, (uint32_t)texHeight };
+    vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
+    // We pass eUndefined to prevent the automatic layout transition
+    Image gpuImage(context, extent, vk::Format::eR8G8B8A8Srgb, usage, vk::ImageLayout::eUndefined);
+
+    // 4. Copy data from staging buffer to GPU image and set the correct layout for shaders
+    context.oneTimeSubmit([&](vk::CommandBuffer cmd) {
+        // Transition layout to be ready for copying
+        Image::setImageLayout(cmd, *gpuImage.image, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal);
+
+        // Copy the data
+        vk::BufferImageCopy region;
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = vk::Offset3D(0, 0, 0);
+        region.imageExtent = vk::Extent3D(extent.width, extent.height, 1);
+        cmd.copyBufferToImage(*stagingBuffer.buffer, *gpuImage.image, vk::ImageLayout::eTransferDstOptimal, region);
+
+        // Transition layout to be ready for shader reading
+        Image::setImageLayout(cmd, *gpuImage.image, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal);
+    });
+
+    // 5. Create a texture sampler
+    vk::SamplerCreateInfo samplerInfo{};
+    samplerInfo.magFilter = vk::Filter::eLinear;
+    samplerInfo.minFilter = vk::Filter::eLinear;
+    samplerInfo.mipmapMode = vk::SamplerMipmapMode::eLinear;
+    samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
+    samplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
+    samplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
+    samplerInfo.mipLodBias = 0.0f;
+    samplerInfo.anisotropyEnable = VK_FALSE;  // requires device feature enabled
+    samplerInfo.maxAnisotropy = 1; //context.physicalDevice.getProperties().limits.maxSamplerAnisotropy;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = vk::CompareOp::eAlways;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+    samplerInfo.borderColor = vk::BorderColor::eIntOpaqueBlack;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    vk::UniqueSampler sampler = context.device->createSamplerUnique(samplerInfo);
+
+    // 6. Return the completed texture object
+    return { std::move(gpuImage), std::move(sampler) };
+}
 
 Camera camera;
 bool firstMouse = true;
@@ -758,7 +859,17 @@ int main() {
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
     std::vector<Face> faces;
-    loadFromFile(vertices, indices, faces);
+    std::vector<std::string> textureFiles;
+    loadFromFile(vertices, indices, faces, textureFiles, "../assets/models/sponza.obj");
+    //loadFromFile(vertices, indices, faces, textureFiles, "../assets/models/CornellBox-Original.obj");
+    //loadFromFile(vertices, indices, faces, textureFiles, "../assets/models/dragon.obj");
+
+	// Load textures
+    std::vector<Texture> textures;
+    textures.reserve(textureFiles.size());
+    for (const auto& filePath : textureFiles) {
+        textures.push_back(createTexture(context, filePath));
+    }
 
     Buffer vertexBuffer{context, Buffer::Type::AccelInput, sizeof(Vertex) * vertices.size(), vertices.data()};
     Buffer indexBuffer{context, Buffer::Type::AccelInput, sizeof(uint32_t) * indices.size(), indices.data()};
@@ -828,6 +939,10 @@ int main() {
     shaderGroups[1] = {vk::RayTracingShaderGroupTypeKHR::eGeneral, 1, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR};
     shaderGroups[2] = {vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup, VK_SHADER_UNUSED_KHR, 2, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR};
 
+    // Note: Ensure your device supports enough samplers. Sponza has ~50 textures.
+    // A size of 0 is invalid, so handle the no-texture case.
+    const uint32_t textureCount = textures.empty() ? 1 : static_cast<uint32_t>(textures.size());
+
     // create ray tracing pipeline
     std::vector<vk::DescriptorSetLayoutBinding> bindings{
         {0, vk::DescriptorType::eAccelerationStructureKHR, 1, vk::ShaderStageFlagBits::eRaygenKHR},  // Binding = 0 : TLAS
@@ -835,6 +950,7 @@ int main() {
         {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},         // Binding = 2 : Vertices
         {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},         // Binding = 3 : Indices
         {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},         // Binding = 4 : Faces
+		{5, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // Binding = 5 : Textures
     };
 
     // Create desc set layout
@@ -897,18 +1013,81 @@ int main() {
 
     // Create desc set
     vk::UniqueDescriptorSet descSet = context.allocateDescSet(*descSetLayout);
-    std::vector<vk::WriteDescriptorSet> writes(bindings.size());
-    for (int i = 0; i < bindings.size(); i++) {
-        writes[i].setDstSet(*descSet);
-        writes[i].setDescriptorType(bindings[i].descriptorType);
-        writes[i].setDescriptorCount(bindings[i].descriptorCount);
-        writes[i].setDstBinding(bindings[i].binding);
+
+    // Create dummy resources that persist until the end of the program
+    vk::UniqueSampler dummySampler;
+    vk::UniqueImageView dummyImageView;
+
+    // Prepare the texture info for the descriptor write
+    std::vector<vk::DescriptorImageInfo> imageInfos;
+    if (textures.empty()) {
+        // Create a dummy texture/sampler for the case when there are no textures
+        vk::SamplerCreateInfo samplerInfo{};
+        samplerInfo.magFilter = vk::Filter::eLinear;
+        samplerInfo.minFilter = vk::Filter::eLinear;
+        samplerInfo.addressModeU = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeV = vk::SamplerAddressMode::eRepeat;
+        samplerInfo.addressModeW = vk::SamplerAddressMode::eRepeat;
+        dummySampler = context.device->createSamplerUnique(samplerInfo);
+
+        // Create a dummy 1x1 black texture
+        Image dummyImage{ context,
+                        {1, 1},
+                        vk::Format::eR8G8B8A8Unorm,
+                        vk::ImageUsageFlagBits::eSampled,
+                        vk::ImageLayout::eShaderReadOnlyOptimal };
+
+        dummyImageView = std::move(dummyImage.view);
+
+        // Add the dummy descriptor
+        imageInfos.push_back({ *dummySampler, *dummyImageView, vk::ImageLayout::eShaderReadOnlyOptimal });
     }
+    else {
+        for (const auto& texture : textures) {
+            imageInfos.push_back({ *texture.sampler, *texture.image.view, vk::ImageLayout::eShaderReadOnlyOptimal });
+        }
+    }
+
+    // Create the descriptor writes
+    std::vector<vk::WriteDescriptorSet> writes;
+    writes.resize(6);
+
+    writes[0].setDstSet(*descSet);
+    writes[0].setDstBinding(0);
+    writes[0].setDescriptorCount(1);
+    writes[0].setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR);
     writes[0].setPNext(&topAccel.descAccelInfo);
+
+    writes[1].setDstSet(*descSet);
+    writes[1].setDstBinding(1);
+    writes[1].setDescriptorCount(1);
+    writes[1].setDescriptorType(vk::DescriptorType::eStorageImage);
     writes[1].setImageInfo(outputImage.descImageInfo);
+
+    writes[2].setDstSet(*descSet);
+    writes[2].setDstBinding(2);
+    writes[2].setDescriptorCount(1);
+    writes[2].setDescriptorType(vk::DescriptorType::eStorageBuffer);
     writes[2].setBufferInfo(vertexBuffer.descBufferInfo);
+
+    writes[3].setDstSet(*descSet);
+    writes[3].setDstBinding(3);
+    writes[3].setDescriptorCount(1);
+    writes[3].setDescriptorType(vk::DescriptorType::eStorageBuffer);
     writes[3].setBufferInfo(indexBuffer.descBufferInfo);
+
+    writes[4].setDstSet(*descSet);
+    writes[4].setDstBinding(4);
+    writes[4].setDescriptorCount(1);
+    writes[4].setDescriptorType(vk::DescriptorType::eStorageBuffer);
     writes[4].setBufferInfo(faceBuffer.descBufferInfo);
+
+    writes[5].setDstSet(*descSet);
+    writes[5].setDstBinding(5);
+    writes[5].setDescriptorCount(textureCount);
+    writes[5].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+    writes[5].setImageInfo(imageInfos);
+
     context.device->updateDescriptorSets(writes, nullptr);
 
     // Main loop

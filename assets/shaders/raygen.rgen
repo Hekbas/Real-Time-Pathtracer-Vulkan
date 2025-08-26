@@ -69,11 +69,11 @@ void main()
         // Initial ray properties
         vec4 origin    = vec4(pc.cameraPos, 1.0);
         vec4 direction = vec4(rayDir, 0.0);
-        vec3 weight = vec3(1.0);
+        vec3 weight = vec3(12.0);
         payload.done = false;
 
         // --- Path Tracing Loop ---
-        for(uint depth = 0; depth < 8; depth++){
+        for(uint depth = 0; depth < 8; depth++) {
             traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, origin.xyz, 0.001, direction.xyz, 10000.0, 0);
 
             // Add emitted light from hit
