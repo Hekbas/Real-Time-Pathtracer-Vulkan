@@ -1,0 +1,197 @@
+#version 460
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Input and output images
+layout(binding = 0, rgba32f) uniform image2D inputImage;
+layout(binding = 1, rgba32f) uniform image2D gbufferPosition;
+layout(binding = 2, rgba32f) uniform image2D gbufferNormal;
+layout(binding = 3, rgba32f) uniform image2D gbufferAlbedo;
+layout(binding = 4, rg32f) uniform image2D gbufferMotion;
+
+// History buffers
+layout(binding = 5, rgba32f) uniform image2D historyColor;
+layout(binding = 6, rg32f) uniform image2D historyMoments;
+layout(binding = 7, rgba32f) uniform image2D historyNormal;
+layout(binding = 8, r32f) uniform image2D historyDepth;
+
+// Output buffers
+layout(binding = 9, rgba32f) uniform image2D outputColor;
+layout(binding = 10, r32f) uniform image2D intensity;
+layout(binding = 11, r32f) uniform image2D variance;
+layout(binding = 12, rgba32f) uniform image2D filtered;
+
+// Uniform buffer for settings
+layout(binding = 13) uniform DenoiserSettings {
+    int temporalAccumulation;
+    int atrousIterations;
+    float phiColor;
+    float phiNormal;
+    float phiDepth;
+} settings;
+
+// Constants
+const float EPSILON = 1e-6;
+const int KERNEL_SIZE = 5;
+const float KERNEL_WEIGHTS[KERNEL_SIZE] = float[](1.0/16.0, 1.0/4.0, 3.0/8.0, 1.0/4.0, 1.0/16.0);
+
+// Helper functions
+float luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float depthWeight(float depthCenter, float depthSample, float phiDepth) {
+    return exp(-abs(depthCenter - depthSample) / phiDepth);
+}
+
+float normalWeight(vec3 normalCenter, vec3 normalSample, float phiNormal) {
+    return pow(max(0.0, dot(normalCenter, normalSample)), phiNormal);
+}
+
+float luminanceWeight(float luminanceCenter, float luminanceSample, float variance, float phiColor) {
+    return exp(-abs(luminanceCenter - luminanceSample) / (phiColor * sqrt(variance) + EPSILON));
+}
+
+void main() {
+    ivec2 pixelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imageSize = imageSize(inputImage);
+    
+    if (pixelCoord.x >= imageSize.x || pixelCoord.y >= imageSize.y) {
+        return;
+    }
+    
+    // Read current frame data
+    vec4 currentColor = imageLoad(inputImage, pixelCoord);
+    vec4 currentPosition = imageLoad(gbufferPosition, pixelCoord);
+    vec4 currentNormal = imageLoad(gbufferNormal, pixelCoord);
+    vec4 currentAlbedo = imageLoad(gbufferAlbedo, pixelCoord);
+    vec2 currentMotion = imageLoad(gbufferMotion, pixelCoord).xy;
+    
+    // Convert to linear space if needed
+    currentColor.rgb = pow(currentColor.rgb, vec3(2.2));
+    
+    // Temporal accumulation
+    if (settings.temporalAccumulation != 0) {
+        // Reproject previous frame position
+        ivec2 prevCoord = ivec2(pixelCoord - currentMotion * vec2(imageSize));
+        
+        if (prevCoord.x >= 0 && prevCoord.x < imageSize.x && 
+            prevCoord.y >= 0 && prevCoord.y < imageSize.y) {
+            
+            // Read history data
+            vec4 historyColorVal = imageLoad(historyColor, prevCoord);
+            vec2 historyMomentsVal = imageLoad(historyMoments, prevCoord).xy;
+            vec4 historyNormalVal = imageLoad(historyNormal, prevCoord);
+            float historyDepthVal = imageLoad(historyDepth, prevCoord).r;
+            
+            // Calculate weights for history rejection
+            float depthW = depthWeight(currentPosition.z, historyDepthVal, settings.phiDepth);
+            float normalW = normalWeight(currentNormal.xyz, historyNormalVal.xyz, settings.phiNormal);
+            
+            // Blend factor based on weights
+            float blendFactor = clamp(depthW * normalW, 0.0, 1.0);
+            
+            // Blend with history
+            currentColor = mix(currentColor, historyColorVal, blendFactor);
+            
+            // Update moments (mean and variance)
+            float currentLuminance = luminance(currentColor.rgb);
+            float historyMean = historyMomentsVal.x;
+            float historyVariance = max(0.0, historyMomentsVal.y - historyMean * historyMean);
+            
+            float newMean = mix(historyMean, currentLuminance, blendFactor);
+            float newVariance = mix(historyVariance, 0.0, blendFactor);
+            
+            // Store updated history
+            imageStore(historyColor, pixelCoord, currentColor);
+            imageStore(historyMoments, pixelCoord, vec4(newMean, newVariance + newMean * newMean, 0.0, 0.0));
+            imageStore(historyNormal, pixelCoord, currentNormal);
+            imageStore(historyDepth, pixelCoord, vec4(currentPosition.z, 0.0, 0.0, 0.0));
+        } else {
+            // No history available, store current frame as history
+            float currentLuminance = luminance(currentColor.rgb);
+            
+            imageStore(historyColor, pixelCoord, currentColor);
+            imageStore(historyMoments, pixelCoord, vec4(currentLuminance, currentLuminance * currentLuminance, 0.0, 0.0));
+            imageStore(historyNormal, pixelCoord, currentNormal);
+            imageStore(historyDepth, pixelCoord, vec4(currentPosition.z, 0.0, 0.0, 0.0));
+        }
+    }
+    
+    // Calculate intensity and variance for variance-guided filtering
+    float currentLuminance = luminance(currentColor.rgb);
+    imageStore(intensity, pixelCoord, vec4(currentLuminance, 0.0, 0.0, 0.0));
+    
+    // Calculate variance (using neighborhood)
+    float mean = 0.0;
+    float meanSq = 0.0;
+    int sampleCount = 0;
+    
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            ivec2 sampleCoord = clamp(pixelCoord + ivec2(x, y), ivec2(0), imageSize - ivec2(1));
+            float sampleLuminance = imageLoad(intensity, sampleCoord).r;
+            mean += sampleLuminance;
+            meanSq += sampleLuminance * sampleLuminance;
+            sampleCount++;
+        }
+    }
+    
+    mean /= sampleCount;
+    meanSq /= sampleCount;
+    float var = max(0.0, meanSq - mean * mean);
+    
+    imageStore(variance, pixelCoord, vec4(var, 0.0, 0.0, 0.0));
+    
+    // Apply A-Trous wavelet filter
+    vec4 filteredColor = vec4(0.0);
+    float totalWeight = 0.0;
+    
+    for (int y = -2; y <= 2; y++) {
+        for (int x = -2; x <= 2; x++) {
+            ivec2 sampleCoord = clamp(pixelCoord + ivec2(x, y), ivec2(0), imageSize - ivec2(1));
+            
+            vec4 sampleColor = imageLoad(inputImage, sampleCoord);
+            vec4 samplePosition = imageLoad(gbufferPosition, sampleCoord);
+            vec4 sampleNormal = imageLoad(gbufferNormal, sampleCoord);
+            float sampleVariance = imageLoad(variance, sampleCoord).r;
+            
+            // Convert to linear space if needed
+            sampleColor.rgb = pow(sampleColor.rgb, vec3(2.2));
+            
+            // Calculate weights
+            float depthW = depthWeight(currentPosition.z, samplePosition.z, settings.phiDepth);
+            float normalW = normalWeight(currentNormal.xyz, sampleNormal.xyz, settings.phiNormal);
+            float luminanceW = luminanceWeight(currentLuminance, luminance(sampleColor.rgb), sampleVariance, settings.phiColor);
+            
+            // Spatial weight (Gaussian)
+            int dist = abs(x) + abs(y);
+            float spatialW = KERNEL_WEIGHTS[dist];
+            
+            // Combined weight
+            float weight = depthW * normalW * luminanceW * spatialW;
+            
+            filteredColor += sampleColor * weight;
+            totalWeight += weight;
+        }
+    }
+    
+    // Normalize and store result
+    if (totalWeight > EPSILON) {
+        filteredColor /= totalWeight;
+    }
+    
+    // Convert back to sRGB
+    filteredColor.rgb = pow(filteredColor.rgb, vec3(1.0/2.2));
+    
+    imageStore(filtered, pixelCoord, filteredColor);
+    imageStore(outputColor, pixelCoord, filteredColor);
+}

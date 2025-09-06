@@ -5,9 +5,9 @@ project "Pathtracer"
     cppdialect "C++17"
     
     files {
-        "source/*.h",
-        "source/*.cpp",
-        "source/*.hpp"
+        "source/**.h",
+        "source/**.cpp",
+        "source/**.hpp"
     }
     
     includedirs {
