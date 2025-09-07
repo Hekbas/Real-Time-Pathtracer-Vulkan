@@ -43,7 +43,7 @@ vec3 sampleDirection(float rand1, float rand2, vec3 normal) {
 void main()
 {
     // SPP for anti-aliasing
-    int maxSamples = 32;
+    int maxSamples = 4;
     vec3 color = vec3(0.0);
 
     for(uint sampleNum = 0; sampleNum < maxSamples; sampleNum++) {
@@ -57,7 +57,7 @@ void main()
         vec2 d = inUV * 2.0 - 1.0;
         
         float aspect_ratio = float(gl_LaunchSizeEXT.x) / float(gl_LaunchSizeEXT.y);
-        float fov = 45.0; 
+        float fov = 70.0; 
         float tan_fov = tan(radians(fov * 0.5));
 
         vec3 rayDir = normalize(
