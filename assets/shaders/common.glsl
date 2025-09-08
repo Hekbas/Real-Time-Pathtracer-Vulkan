@@ -1,10 +1,17 @@
 
+const int MAT_LAMBERTIAN = 0;
+const int MAT_METAL = 1;
+const int MAT_DIELECTRIC = 2;
+
 struct HitPayload
 {
     vec3 position;
     vec3 normal;
     vec3 emission;
-    vec3 brdf;
+    vec3 albedo;
+    float roughness;
+    float ior;
+    int material_type;
     bool done;
 };
 

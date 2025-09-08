@@ -6,6 +6,10 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
 
+#define MAT_LAMBERTIAN 0
+#define MAT_METAL      1
+#define MAT_DIELECTRIC 2
+
 Vec3 calcNormal(Vec3 v0, Vec3 v1, Vec3 v2) {
     Vec3 edge1 = v1 - v0;
     Vec3 edge2 = v2 - v0;
@@ -19,101 +23,122 @@ void loadFromFile(
     std::vector<std::string>& textureFiles,
     const std::string& modelPath)
 {
-    // Clear output vectors
-    vertices.clear();
-    indices.clear();
-    faces.clear();
-    textureFiles.clear();
-
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;
     std::vector<tinyobj::material_t> materials;
     std::string warn, err;
 
-    // Assumes materials are in a subfolder named "materials" relative to the model path
+    // Get the directory of the model file for loading materials/textures
     std::string modelDir = modelPath.substr(0, modelPath.find_last_of("/\\") + 1);
 
-    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, modelPath.c_str(), modelDir.c_str())) {
-        throw std::runtime_error("TinyObjLoader: " + warn + err);
+    // Load the OBJ file. The `true` argument tells it to load materials from the MTL file.
+    if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, modelPath.c_str(), modelDir.c_str(), true)) {
+        throw std::runtime_error("TINYOBJLOADER: " + warn + err);
+    }
+    if (!warn.empty()) {
+        std::cout << "TINYOBJLOADER WARNING: " << warn << std::endl;
     }
 
-    // A map to store unique texture paths and their assigned index
+    // A map to keep track of loaded textures to avoid duplicates
     std::map<std::string, int> textureMap;
-    for (const auto& material : materials) {
-        if (!material.diffuse_texname.empty()) {
-            if (textureMap.find(material.diffuse_texname) == textureMap.end()) {
-                int textureId = static_cast<int>(textureFiles.size());
-                textureMap[material.diffuse_texname] = textureId;
-                textureFiles.push_back(modelDir + material.diffuse_texname);
-            }
-        }
-    }
 
-    // Process each shape in the model
+    // Loop over shapes
     for (const auto& shape : shapes) {
-        // A face in tinyobjloader is a polygon. We assume triangles.
+        // Loop over faces(triangles)
         size_t index_offset = 0;
-        for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); ++f) {
-            size_t num_verts_in_face = shape.mesh.num_face_vertices[f];
+        for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++) {
+            // We assume the model is triangulated
+            int fv = 3;
 
-            if (num_verts_in_face != 3) {
-                // This logic only supports triangles, so we skip non-triangle faces.
-                index_offset += num_verts_in_face;
-                continue;
-            }
+            // This face's material properties
+            Face face_props{};
 
-            // Get the material for this face
-            Face current_face{};
+            // Get the material ID for this face.
             int material_id = shape.mesh.material_ids[f];
 
-            if (material_id >= 0) {
+            if (material_id != -1) {
                 const auto& mat = materials[material_id];
-                current_face.diffuse[0] = mat.diffuse[0];
-                current_face.diffuse[1] = mat.diffuse[1];
-                current_face.diffuse[2] = mat.diffuse[2];
-                current_face.emission[0] = mat.emission[0];
-                current_face.emission[1] = mat.emission[1];
-                current_face.emission[2] = mat.emission[2];
 
+                // 1. Set Albedo and Emission
+                face_props.albedo = Vec3(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2]);
+                face_props.emission = Vec3(mat.emission[0], mat.emission[1], mat.emission[2]);
+
+                // 2. Determine Material Type and Properties (The Heuristic)
+                if (mat.transmittance[0] > 0.0f) { // Is it transparent?
+                    face_props.material_type = MAT_DIELECTRIC;
+                    face_props.ior = mat.ior; // Get index of refraction
+                    face_props.roughness = 0.0f; // Dielectrics are smooth in this simple model
+                }
+                else if (mat.specular[0] > 0.5f && mat.diffuse[0] < 0.2f) { // Is it metallic?
+                    face_props.material_type = MAT_METAL;
+                    face_props.albedo = Vec3(mat.specular[0], mat.specular[1], mat.specular[2]); // Metals use specular color
+                    // Map shininess (Ns) to roughness
+                    face_props.roughness = std::max(0.0f, 1.0f - (mat.shininess / 1000.0f));
+                    face_props.ior = 0.0f;
+                }
+                else { // Otherwise, it's diffuse
+                    face_props.material_type = MAT_LAMBERTIAN;
+                    face_props.roughness = 1.0f; // Lambertian is maximum roughness
+                    face_props.ior = 0.0f;
+                }
+
+                // 3. Handle Textures
                 if (!mat.diffuse_texname.empty()) {
-                    current_face.diffuseTextureID = textureMap.at(mat.diffuse_texname);
+                    std::string texPath = modelDir + mat.diffuse_texname;
+                    if (textureMap.find(texPath) == textureMap.end()) {
+                        // New texture, add it to our list
+                        textureMap[texPath] = textureFiles.size();
+                        textureFiles.push_back(texPath);
+                    }
+                    face_props.diffuseTextureID = textureMap[texPath];
                 }
                 else {
-                    current_face.diffuseTextureID = -1;
+                    face_props.diffuseTextureID = -1;
                 }
+
             }
             else {
-                // Default material if none is assigned
-                current_face.diffuse[0] = 0.8f; current_face.diffuse[1] = 0.8f; current_face.diffuse[2] = 0.8f;
-                current_face.emission[0] = 0.0f; current_face.emission[1] = 0.0f; current_face.emission[2] = 0.0f;
-                current_face.diffuseTextureID = -1;
+                // No material assigned, use a default diffuse material
+                face_props.material_type = MAT_LAMBERTIAN;
+                face_props.albedo = Vec3(0.7f, 0.7f, 0.7f);
+                face_props.emission = Vec3(0.0f, 0.0f, 0.0f);
+                face_props.roughness = 1.0f;
+                face_props.diffuseTextureID = -1;
+                face_props.ior = 0.0f;
             }
-            faces.push_back(current_face);
 
-            // Process the 3 vertices for this triangle
-            for (size_t v = 0; v < 3; ++v) {
+            // This single 'Face' struct will apply to the whole triangle.
+            // In Vulkan Ray Tracing, we access this via `gl_PrimitiveID`.
+            faces.push_back(face_props);
+
+            // Loop over vertices in the face
+            for (size_t v = 0; v < fv; v++) {
                 tinyobj::index_t idx = shape.mesh.indices[index_offset + v];
                 Vertex vertex{};
 
-                vertex.position.x = attrib.vertices[3 * idx.vertex_index + 0];
-                vertex.position.y = attrib.vertices[3 * idx.vertex_index + 1];
-                vertex.position.z = attrib.vertices[3 * idx.vertex_index + 2];
+                vertex.position = {
+                    attrib.vertices[3 * idx.vertex_index + 0],
+                    attrib.vertices[3 * idx.vertex_index + 1],
+                    attrib.vertices[3 * idx.vertex_index + 2]
+                };
 
-                if (idx.normal_index >= 0) {
-                    vertex.normal.x = attrib.normals[3 * idx.normal_index + 0];
-                    vertex.normal.y = attrib.normals[3 * idx.normal_index + 1];
-                    vertex.normal.z = attrib.normals[3 * idx.normal_index + 2];
+                if (!attrib.normals.empty()) {
+                    vertex.normal = {
+                        attrib.normals[3 * idx.normal_index + 0],
+                        attrib.normals[3 * idx.normal_index + 1],
+                        attrib.normals[3 * idx.normal_index + 2]
+                    };
                 }
 
-                if (idx.texcoord_index >= 0) {
+                if (!attrib.texcoords.empty()) {
                     vertex.texCoord[0] = attrib.texcoords[2 * idx.texcoord_index + 0];
                     vertex.texCoord[1] = 1.0f - attrib.texcoords[2 * idx.texcoord_index + 1];
                 }
 
                 vertices.push_back(vertex);
-                indices.push_back(static_cast<uint32_t>(indices.size()));
+                indices.push_back(indices.size());
             }
-            index_offset += num_verts_in_face;
+            index_offset += fv;
         }
     }
 }

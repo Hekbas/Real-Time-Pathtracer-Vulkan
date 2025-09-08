@@ -19,6 +19,12 @@
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
+///////////// MODEL LOADER /////////////
+
+std::string MODEL_TO_LOAD = "bugatti.obj";
+
+////////////////////////////////////////
+
 
 // Global variables
 Camera camera;
@@ -99,9 +105,8 @@ int main() {
     std::vector<uint32_t> indices;
     std::vector<Face> faces;
     std::vector<std::string> textureFiles;
-    loadFromFile(vertices, indices, faces, textureFiles, "../assets/models/sponza.obj");
-    //loadFromFile(vertices, indices, faces, textureFiles, "../assets/models/CornellBox-Original.obj");
-    //loadFromFile(vertices, indices, faces, textureFiles, "../assets/models/dragon.obj");
+	std::string modelPath = "../assets/models/" + MODEL_TO_LOAD;
+    loadFromFile(vertices, indices, faces, textureFiles, modelPath);
 
 	// Load textures
     std::vector<Texture> textures;

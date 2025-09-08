@@ -21,9 +21,12 @@ struct Vertex
 
 struct Face
 {
-    vec3 diffuse;
+    vec3 albedo;
     vec3 emission;
     int  diffuseTextureID;
+    int  material_type;
+    float roughness;
+    float ior;
 };
 
 Vertex unpackVertex(uint index)
@@ -39,12 +42,15 @@ Vertex unpackVertex(uint index)
 
 Face unpackFace(uint index)
 {
-    uint stride = 7;
+    uint stride = 12;
     uint offset = index * stride;
     Face f;
-    f.diffuse  = vec3(faces[offset + 0], faces[offset + 1], faces[offset + 2]);
-    f.emission = vec3(faces[offset + 3], faces[offset + 4], faces[offset + 5]);
-    f.diffuseTextureID = floatBitsToInt(faces[offset + 6]);
+    f.albedo    = vec3(faces[offset + 0], faces[offset + 1], faces[offset + 2]);
+    f.emission  = vec3(faces[offset + 3], faces[offset + 4], faces[offset + 5]);
+    f.diffuseTextureID  = floatBitsToInt(faces[offset + 6]);
+    f.material_type     = floatBitsToInt(faces[offset + 7]);
+    f.roughness         = faces[offset + 8];
+    f.ior               = faces[offset + 9];
     return f;
 }
 
@@ -54,26 +60,24 @@ void main() {
     const Vertex v2 = unpackVertex(indices[3 * gl_PrimitiveID + 2]);
 
     const vec3 barycentricCoords = vec3(1.0f - attribs.x - attribs.y, attribs.x, attribs.y);
-
     const vec3 position = v0.position * barycentricCoords.x + v1.position * barycentricCoords.y + v2.position * barycentricCoords.z;
     const vec3 normal   = normalize(v0.normal * barycentricCoords.x + v1.normal * barycentricCoords.y + v2.normal * barycentricCoords.z);
-    
-    // Interpolate texture coordinates
     const vec2 texCoord = v0.texCoord * barycentricCoords.x + v1.texCoord * barycentricCoords.y + v2.texCoord * barycentricCoords.z;
 
     const Face face = unpackFace(gl_PrimitiveID);
     
-    vec3 diffuseColor = face.diffuse;
-    // If the face has a valid texture ID, sample the texture
+    vec3 albedoColor = face.albedo;
     if (face.diffuseTextureID != -1) {
-        // non uniformity check helps the compiler with dynamic array indexing
-        diffuseColor = texture(nonuniformEXT(diffuseTextures[nonuniformEXT(face.diffuseTextureID)]), texCoord).rgb;
+        albedoColor = texture(nonuniformEXT(diffuseTextures[nonuniformEXT(face.diffuseTextureID)]), texCoord).rgb;
     }
 
     // Set payload data
-    payload.brdf     = diffuseColor / M_PI;
-    payload.emission = face.emission;
-    payload.position = position;
-    payload.normal   = normal;
-    payload.done     = false;
+    payload.albedo        = albedoColor / M_PI;
+    payload.emission      = face.emission;
+    payload.position      = position;
+    payload.normal        = normal;
+    payload.roughness     = face.roughness;
+    payload.ior           = face.ior;
+    payload.material_type = face.material_type;
+    payload.done          = false;
 }

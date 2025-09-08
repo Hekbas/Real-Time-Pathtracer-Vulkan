@@ -18,9 +18,13 @@ struct Vertex {
 };
 
 struct Face {
-    float diffuse[3];
-    float emission[3];
+    Vec3 albedo;
+    Vec3 emission;
     int diffuseTextureID;
+    int material_type;
+    float roughness;
+    float ior;
+    float pad[2];
 };
 
 void loadFromFile(
