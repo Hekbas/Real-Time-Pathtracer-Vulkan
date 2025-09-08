@@ -1,49 +1,41 @@
 #pragma once
 
 #include "math/vec3.h"
+#include "math/vec4.h"
 
 #include <vector>
 #include <string>
 
 struct Vertex {
-    Vec3 position;
+    Vec3 pos;
     Vec3 normal;
-    float texCoord[2];
-
-    bool operator==(const Vertex& other) const {
-        return position == other.position &&
-            normal == other.normal &&
-            texCoord == other.texCoord;
-    }
+    Vec3 tangent;
+    float uv[2];
 };
 
-struct Face {
-    Vec3 albedo;
-    Vec3 emission;
-    int diffuseTextureID;
-    int material_type;
-    float roughness;
-    float ior;
-    float pad[2];
+struct Material {
+    Vec4 baseColorFactor;   // (r,g,b,a)
+    int baseColorTex;       // texture index or -1
+    int metallicRoughnessTex;
+    int emissiveTex;
+    int normalTex;
+    int occlusionTex;
+    int doubleSided;        // 0 or 1
+    int alphaMode;          // 0 opaque, 1 mask, 2 blend
+    float metallicFactor;
+    float roughnessFactor;
+    // pad to 16 bytes (std430)
+    float _pad0;
+    float _pad1;
+    Vec4 emissiveFactor;    // (r,g,b,unused)
 };
 
 void loadFromFile(
-    std::vector<Vertex>& vertices,
-    std::vector<uint32_t>& indices,
-    std::vector<Face>& faces,
-    std::vector<std::string>& textureFiles,
-    const std::string& modelPath);
+    std::vector<Vertex>& outVertices,
+    std::vector<uint32_t>& outIndices,
+    std::vector<Material>& outMaterials,
+    std::vector<std::string>& outTextureFiles,
+    std::vector<uint32_t>& outMaterialIndexPerTriangle,
+    const std::string& filename);
 
 std::vector<char> readFile(const std::string& filename);
-
-// Hash support
-namespace std {
-    template<> struct hash<Vertex> {
-        size_t operator()(const Vertex& v) const noexcept {
-            size_t h1 = hash<float>()(v.position.x) ^ (hash<float>()(v.position.y) << 1) ^ (hash<float>()(v.position.z) << 2);
-            size_t h2 = hash<float>()(v.normal.x) ^ (hash<float>()(v.normal.y) << 1) ^ (hash<float>()(v.normal.z) << 2);
-            size_t h3 = hash<float>()(v.texCoord[0]) ^ (hash<float>()(v.texCoord[1]) << 1);
-            return h1 ^ (h2 << 1) ^ (h3 << 2);
-        }
-    };
-}
