@@ -93,7 +93,9 @@ void processNode(
     const Mat4& parentMatrix,
     std::vector<Vertex>& vertices,
     std::vector<uint32_t>& indices,
-    std::vector<Face>& faces,
+    std::vector<Material>& materials,
+    std::vector<uint32_t>& faceMaterialIndices,
+    std::map<int, uint32_t>& gltfMaterialMap,
     std::unordered_map<std::string, int>& textureIndexMap,
     std::vector<std::string>& textureFiles,
     const std::string& modelDir,
@@ -239,98 +241,104 @@ void processNode(
             for (uint32_t idx : primitiveIndices)
                 indices.push_back(vertexOffset + idx);
 
-            // --- Material baseFace ---
-            Face baseFace{};
-            baseFace.albedo.x = 0.8f; baseFace.albedo.y = 0.8f; baseFace.albedo.z = 0.8f;
-            baseFace.emission.x = baseFace.emission.y = baseFace.emission.z = 0.0f;
-            baseFace.diffuseTextureID = uint32_t(-1);
-            baseFace.material_type = 0;
-            baseFace.roughness = 1.0f;
-            baseFace.ior = 1.5f;
-            baseFace.metallic = 0.0f;
-            baseFace.alpha = 1.0f;
-            baseFace.area = 0.0f;
-            baseFace.metalRoughTextureID = uint32_t(-1);
-            baseFace.normalTextureID = uint32_t(-1);
-			baseFace.pad0 = 0.0f;
+            // --- Material Processing ---
+            Material baseMaterial{};
+            // Set default material properties
+            baseMaterial.albedo = { 0.8f, 0.8f, 0.8f };
+            baseMaterial.emission = { 0.0f, 0.0f, 0.0f };
+            baseMaterial.diffuseTextureID = -1;
+            baseMaterial.material_type = 0; // MAT_LAMBERTIAN
+            baseMaterial.roughness = 1.0f;
+            baseMaterial.ior = 1.5f;
+            baseMaterial.metallic = 0.0f;
+            baseMaterial.alpha = 1.0f;
+            baseMaterial.metalRoughTextureID = -1;
+            baseMaterial.normalTextureID = -1;
 
-            if (primitive.material >= 0) {
-                const auto& material = model.materials[primitive.material];
-                const auto& pbr = material.pbrMetallicRoughness;
+            uint32_t materialIndex = 0;
 
-                if (pbr.baseColorFactor.size() >= 3) {
-                    baseFace.albedo.x = (float)pbr.baseColorFactor[0];
-                    baseFace.albedo.y = (float)pbr.baseColorFactor[1];
-                    baseFace.albedo.z = (float)pbr.baseColorFactor[2];
-                }
-                if (pbr.baseColorFactor.size() == 4)
-                    baseFace.alpha = (float)pbr.baseColorFactor[3];
+            // Check if we've already processed this glTF material
+            if (gltfMaterialMap.count(primitive.material)) {
+                materialIndex = gltfMaterialMap[primitive.material];
+            }
+            else {
+                // It's a new material, so process and store it
+                if (primitive.material >= 0) {
+                    const auto& material = model.materials[primitive.material];
+                    const auto& pbr = material.pbrMetallicRoughness;
 
-                if (material.emissiveFactor.size() == 3) {
-                    baseFace.emission.x = (float)material.emissiveFactor[0];
-                    baseFace.emission.y = (float)material.emissiveFactor[1];
-                    baseFace.emission.z = (float)material.emissiveFactor[2];
-                }
-
-                // baseColorTexture
-                if (pbr.baseColorTexture.index >= 0) {
-                    const auto& tex = model.textures[pbr.baseColorTexture.index];
-                    const auto& img = model.images[tex.source];
-                    std::string path = (std::filesystem::path(modelDir) / img.uri).string();
-                    if (!textureIndexMap.count(path)) {
-                        textureIndexMap[path] = (int)textureFiles.size();
-                        textureFiles.push_back(path);
+                    if (pbr.baseColorFactor.size() >= 3) {
+                        baseMaterial.albedo.x = (float)pbr.baseColorFactor[0];
+                        baseMaterial.albedo.y = (float)pbr.baseColorFactor[1];
+                        baseMaterial.albedo.z = (float)pbr.baseColorFactor[2];
                     }
-                    baseFace.diffuseTextureID = textureIndexMap[path];
-                }
+                    if (pbr.baseColorFactor.size() == 4)
+                        baseMaterial.alpha = (float)pbr.baseColorFactor[3];
 
-                baseFace.roughness = (float)pbr.roughnessFactor;
-                baseFace.metallic = (float)pbr.metallicFactor;
-
-                // metallicRoughnessTexture
-                if (pbr.metallicRoughnessTexture.index >= 0) {
-                    const auto& tex = model.textures[pbr.metallicRoughnessTexture.index];
-                    const auto& img = model.images[tex.source];
-                    std::string path = (std::filesystem::path(modelDir) / img.uri).string();
-                    if (!textureIndexMap.count(path)) {
-                        textureIndexMap[path] = (int)textureFiles.size();
-                        textureFiles.push_back(path);
+                    if (material.emissiveFactor.size() == 3) {
+                        baseMaterial.emission.x = (float)material.emissiveFactor[0];
+                        baseMaterial.emission.y = (float)material.emissiveFactor[1];
+                        baseMaterial.emission.z = (float)material.emissiveFactor[2];
                     }
-                    baseFace.metalRoughTextureID = textureIndexMap[path];
-                }
 
-                // normalTexture
-                if (material.normalTexture.index >= 0) {
-                    const auto& tex = model.textures[material.normalTexture.index];
-                    const auto& img = model.images[tex.source];
-                    std::string path = (std::filesystem::path(modelDir) / img.uri).string();
-                    if (!textureIndexMap.count(path)) {
-                        textureIndexMap[path] = (int)textureFiles.size();
-                        textureFiles.push_back(path);
+                    // baseColorTexture
+                    if (pbr.baseColorTexture.index >= 0) {
+                        const auto& tex = model.textures[pbr.baseColorTexture.index];
+                        const auto& img = model.images[tex.source];
+                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                        if (!textureIndexMap.count(path)) {
+                            textureIndexMap[path] = (int)textureFiles.size();
+                            textureFiles.push_back(path);
+                        }
+                        baseMaterial.diffuseTextureID = textureIndexMap[path];
                     }
-                    baseFace.normalTextureID = textureIndexMap[path];
+
+                    baseMaterial.roughness = (float)pbr.roughnessFactor;
+                    baseMaterial.metallic = (float)pbr.metallicFactor;
+
+                    // metallicRoughnessTexture
+                    if (pbr.metallicRoughnessTexture.index >= 0) {
+                        const auto& tex = model.textures[pbr.metallicRoughnessTexture.index];
+                        const auto& img = model.images[tex.source];
+                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                        if (!textureIndexMap.count(path)) {
+                            textureIndexMap[path] = (int)textureFiles.size();
+                            textureFiles.push_back(path);
+                        }
+                        baseMaterial.metalRoughTextureID = textureIndexMap[path];
+                    }
+
+                    // normalTexture
+                    if (material.normalTexture.index >= 0) {
+                        const auto& tex = model.textures[material.normalTexture.index];
+                        const auto& img = model.images[tex.source];
+                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                        if (!textureIndexMap.count(path)) {
+                            textureIndexMap[path] = (int)textureFiles.size();
+                            textureFiles.push_back(path);
+                        }
+                        baseMaterial.normalTextureID = textureIndexMap[path];
+                    }
+
+                    // IOR (extension)
+                    if (material.extensions.count("KHR_materials_ior")) {
+                        const auto& ext = material.extensions.at("KHR_materials_ior");
+                        if (ext.Has("ior"))
+                            baseMaterial.ior = (float)ext.Get("ior").Get<double>();
+                    }
                 }
 
-                // IOR (extension)
-                if (material.extensions.count("KHR_materials_ior")) {
-                    const auto& ext = material.extensions.at("KHR_materials_ior");
-                    if (ext.Has("ior"))
-                        baseFace.ior = (float)ext.Get("ior").Get<double>();
-                }
+                // Add the new material to our list and map its index
+                materialIndex = static_cast<uint32_t>(materials.size());
+                materials.push_back(baseMaterial);
+                gltfMaterialMap[primitive.material] = materialIndex;
             }
 
-            // --- Faces: one per triangle ---
+            // --- Face Material Indices ---
             size_t triCount = primitiveIndices.size() / 3;
             for (size_t t = 0; t < triCount; t++) {
-                uint32_t ia = vertexOffset + primitiveIndices[3 * t + 0];
-                uint32_t ib = vertexOffset + primitiveIndices[3 * t + 1];
-                uint32_t ic = vertexOffset + primitiveIndices[3 * t + 2];
-                Vec3 p0(vertices[ia].position.x, vertices[ia].position.y, vertices[ia].position.z);
-                Vec3 p1(vertices[ib].position.x, vertices[ib].position.y, vertices[ib].position.z);
-                Vec3 p2(vertices[ic].position.x, vertices[ic].position.y, vertices[ic].position.z);
-                float area = 0.5f * cross(p1 - p0, p2 - p0).length();
-                baseFace.area = area;
-                faces.push_back(baseFace);
+                // For each triangle, push the index of its material
+                faceMaterialIndices.push_back(materialIndex);
             }
 
             vertexOffset += (uint32_t)vertexCount;
@@ -339,7 +347,7 @@ void processNode(
 
     for (int child : node.children)
         processNode(model, model.nodes[child], worldMatrix,
-            vertices, indices, faces,
+            vertices, indices, materials, faceMaterialIndices, gltfMaterialMap,
             textureIndexMap, textureFiles, modelDir, vertexOffset);
 }
 
@@ -347,10 +355,11 @@ void processNode(
 void loadFromFile(
     std::vector<Vertex>& vertices,
     std::vector<uint32_t>& indices,
-    std::vector<Face>& faces,
+    std::vector<Material>& materials,
+    std::vector<uint32_t>& faceMaterialIndices,
     std::vector<std::string>& textureFiles,
-    const std::string& modelPath) {
-
+    const std::string& modelPath)
+{
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     std::string err, warn;
@@ -365,6 +374,7 @@ void loadFromFile(
     std::string modelDir = modelFilePath.parent_path().string();
 
     std::unordered_map<std::string, int> textureIndexMap;
+    std::map<int, uint32_t> gltfMaterialMap;
     uint32_t vertexOffset = 0;
 
     // Start processing from the scene nodes
@@ -374,8 +384,8 @@ void loadFromFile(
     for (int nodeIndex : scene.nodes) {
         processNode(
             model, model.nodes[nodeIndex], identityMatrix,
-            vertices, indices, faces, textureIndexMap, textureFiles,
-            modelDir, vertexOffset
+            vertices, indices, materials, faceMaterialIndices, gltfMaterialMap,
+            textureIndexMap, textureFiles, modelDir, vertexOffset
         );
     }
 }

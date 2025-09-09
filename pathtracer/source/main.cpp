@@ -21,7 +21,16 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 ///////////// MODEL LOADER /////////////
 
-std::string MODEL_TO_LOAD = "main_sponza/NewSponza_Main_glTF_003.gltf";
+std::vector<std::string> MODELS_TO_LOAD = {
+	"sponza_lights/scene.gltf",
+	"sponza_lights/NewSponza_4_Combined_glTF.gltf",
+	"sponza_main/NewSponza_Main_glTF_003.gltf",
+	"helmet/DamagedHelmet.gltf"
+};
+
+//std::string MODEL_TO_LOAD = "sponza_main/NewSponza_Main_glTF_003.gltf";
+std::string MODEL_TO_LOAD1 = "sponza_lights/scene.gltf";
+std::string MODEL_TO_LOAD2 = "sponza_lights/NewSponza_4_Combined_glTF.gltf";
 //std::string MODEL_TO_LOAD = "helmet/DamagedHelmet.gltf";
 
 ////////////////////////////////////////
@@ -104,28 +113,24 @@ int main() {
     // Load model
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
-    std::vector<Face> faces;
+    std::vector<Material> materials;
+    std::vector<uint32_t> faceMaterialIndices;
     std::vector<std::string> textureFiles;
-    std::vector<uint32_t> materialIndices;
-    std::string modelPath = "../assets/models/" + MODEL_TO_LOAD;
+    std::string modelPath = "../assets/models/" + MODEL_TO_LOAD1;
 
     std::cout << "Loading model: " << modelPath << std::endl;
-    loadFromFile(vertices, indices, faces, textureFiles, modelPath);
+    loadFromFile(vertices, indices, materials, faceMaterialIndices, textureFiles, modelPath);
 
     // Model loading validation
     if (vertices.empty() || indices.empty()) {
         throw std::runtime_error("No vertices or indices loaded from model");
     }
 
-    std::cout << "Loaded " << vertices.size() << " vertices, "
-        << indices.size() << " indices, "
-        << faces.size() << " faces, "
+    std::cout
+        << vertices.size() << " vertices" << std::endl
+        << indices.size() << " indices" << std::endl
+        << materials.size() << " unique materials, " << std::endl
         << textureFiles.size() << " textures" << std::endl;
-
-    // quick runtime sanity check
-    if (materialIndices.size() != (indices.size() / 3)) {
-        std::cout << "materialIndices size mismatch: expected indices.size()/3" << std::endl;
-    }
 
     // Load textures
     std::vector<Texture> textures;
@@ -134,11 +139,10 @@ int main() {
         textures.push_back(createTexture(context, filePath));
     }
 
-    int a = sizeof(Face);
-
     Buffer vertexBuffer{ context, Buffer::Type::AccelInput, sizeof(Vertex) * vertices.size(), vertices.data() };
     Buffer indexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * indices.size(), indices.data() };
-    Buffer faceBuffer{ context, Buffer::Type::AccelInput, sizeof(Face) * faces.size(), faces.data() };
+    Buffer materialBuffer{ context, Buffer::Type::AccelInput, sizeof(Material) * materials.size(), materials.data() };
+    Buffer faceMaterialIndexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * faceMaterialIndices.size(), faceMaterialIndices.data() };
 
 
     // Create bottom level accel struct
@@ -237,8 +241,9 @@ int main() {
         {1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eRaygenKHR},                         // 1 = Storage image
         {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 2 = Vertices
         {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 3 = Indices
-        {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 4 = Faces
-        {5, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // 5 = Textures
+        {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 4 = Materials
+        {5, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 5 = Face Material Indices
+        {6, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // 6 = Textures
     };
 
     // Create desc set layout
@@ -351,7 +356,7 @@ int main() {
 
     // Create the descriptor writes
     std::vector<vk::WriteDescriptorSet> writes;
-    writes.resize(6);
+    writes.resize(7);
 
     // 0: TLAS
     writes[0].setDstSet(*descSet);
@@ -381,19 +386,26 @@ int main() {
     writes[3].setDescriptorType(vk::DescriptorType::eStorageBuffer);
     writes[3].setBufferInfo(indexBuffer.descBufferInfo);
 
-	// 4: faces buffer
+    // 4: materials buffer
     writes[4].setDstSet(*descSet);
     writes[4].setDstBinding(4);
     writes[4].setDescriptorCount(1);
     writes[4].setDescriptorType(vk::DescriptorType::eStorageBuffer);
-    writes[4].setBufferInfo(faceBuffer.descBufferInfo);
+    writes[4].setBufferInfo(materialBuffer.descBufferInfo);
 
-	// 5: textures array
+    // 5: face material indices buffer
     writes[5].setDstSet(*descSet);
     writes[5].setDstBinding(5);
-    writes[5].setDescriptorCount(textureCount);
-    writes[5].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
-    writes[5].setImageInfo(imageInfos);
+    writes[5].setDescriptorCount(1);
+    writes[5].setDescriptorType(vk::DescriptorType::eStorageBuffer);
+    writes[5].setBufferInfo(faceMaterialIndexBuffer.descBufferInfo);
+
+    // 6: textures array
+    writes[6].setDstSet(*descSet);
+    writes[6].setDstBinding(6);
+    writes[6].setDescriptorCount(textureCount);
+    writes[6].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+    writes[6].setImageInfo(imageInfos);
 
     // Descriptor set validation
     for (auto& write : writes) {

@@ -4,10 +4,11 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 #include "common.glsl"
 
-layout(binding = 2, set = 0) buffer Vertices{float vertices[];};
-layout(binding = 3, set = 0) buffer Indices{uint indices[];};
-layout(binding = 4, set = 0) buffer Faces{float faces[];};
-layout(binding = 5, set = 0) uniform sampler2D textures[];
+layout(binding = 2, set = 0) buffer Vertices { float vertices[]; };
+layout(binding = 3, set = 0) buffer Indices  { uint indices[]; };
+layout(binding = 4, set = 0) buffer Materials { float materials[]; };
+layout(binding = 5, set = 0) buffer FaceMaterialIndices { uint materialIndices[]; };
+layout(binding = 6, set = 0) uniform sampler2D textures[];
 
 layout(location = 0) rayPayloadInEXT HitPayload payload;
 hitAttributeEXT vec2 attribs;
@@ -19,24 +20,23 @@ struct Vertex {
     vec3 tangent;
 };
 
-struct Face {
+struct Material {
     vec3 albedo;
     vec3 emission;
-    int diffuseTextureID;
-    int material_type;
+    int  diffuseTextureID;
+    int  material_type;
     float roughness;
     float ior;
     float metallic;
     float alpha;
-    float area;
-    int metallicRoughnessTextureID;
-    int normalTextureID;
+    int  metalRoughTextureID;
+    int  normalTextureID;
     float pad0;
+    float pad1;
 };
 
-Vertex unpackVertex(uint index)
-{
-    uint stride = 11u; // position(3) + normal(3) + texcoord(2) + tangent(3)
+Vertex unpackVertex(uint index) {
+    uint stride = 11u; // pos(3) + norm(3) + uv(2) + tangent(3)
     uint offset = index * stride;
     Vertex v;
     v.position = vec3(vertices[offset + 0], vertices[offset + 1], vertices[offset + 2]);
@@ -46,81 +46,81 @@ Vertex unpackVertex(uint index)
     return v;
 }
 
-Face unpackFace(uint index)
-{
-    uint stride = 16u; // as defined in C++ Face struct
+Material unpackMaterial(uint index) {
+    uint stride = 16u;
     uint offset = index * stride;
-    Face f;
-    f.albedo    = vec3(faces[offset + 0], faces[offset + 1], faces[offset + 2]);
-    f.emission  = vec3(faces[offset + 3], faces[offset + 4], faces[offset + 5]);
-    f.diffuseTextureID  = floatBitsToInt(faces[offset + 6]);
-    f.material_type     = floatBitsToInt(faces[offset + 7]);
-    f.roughness         = faces[offset + 8];
-    f.ior               = faces[offset + 9];
-    f.metallic          = faces[offset + 10];
-    f.alpha             = faces[offset + 11];
-    f.area              = faces[offset + 12];
-    f.metallicRoughnessTextureID = floatBitsToInt(faces[offset + 13u]);
-    f.normalTextureID = floatBitsToInt(faces[offset + 14u]);
-    f.pad0 = faces[offset + 15u];
-    return f;
+    Material m;
+    m.albedo            = vec3(materials[offset + 0], materials[offset + 1], materials[offset + 2]);
+    m.emission          = vec3(materials[offset + 3], materials[offset + 4], materials[offset + 5]);
+    m.diffuseTextureID  = floatBitsToInt(materials[offset + 6]);
+    m.material_type     = floatBitsToInt(materials[offset + 7]);
+    m.roughness         = materials[offset + 8];
+    m.ior               = materials[offset + 9];
+    m.metallic          = materials[offset + 10];
+    m.alpha             = materials[offset + 11];
+    m.metalRoughTextureID = floatBitsToInt(materials[offset + 12]);
+    m.normalTextureID   = floatBitsToInt(materials[offset + 13]);
+    m.pad0              = materials[offset + 14];
+    m.pad1              = materials[offset + 15];
+    return m;
 }
 
 void main() {
+    // Vertex unpacking
     const Vertex v0 = unpackVertex(indices[3 * gl_PrimitiveID + 0]);
     const Vertex v1 = unpackVertex(indices[3 * gl_PrimitiveID + 1]);
     const Vertex v2 = unpackVertex(indices[3 * gl_PrimitiveID + 2]);
 
-    const vec3 barycentricCoords = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
-    const vec3 position = v0.position * barycentricCoords.x + v1.position * barycentricCoords.y + v2.position * barycentricCoords.z;
-    vec3 normal   = normalize(v0.normal * barycentricCoords.x + v1.normal * barycentricCoords.y + v2.normal * barycentricCoords.z);
-    const vec2 texCoord = v0.texCoord * barycentricCoords.x + v1.texCoord * barycentricCoords.y + v2.texCoord * barycentricCoords.z;
-    // interpolate tangent (not using bitangent sign)
-    vec3 tangent = normalize(v0.tangent * barycentricCoords.x + v1.tangent * barycentricCoords.y + v2.tangent * barycentricCoords.z);
+    // Attrib interpolation
+    const vec3 bary = vec3(1.0 - attribs.x - attribs.y, attribs.x, attribs.y);
+    const vec3 position = v0.position * bary.x + v1.position * bary.y + v2.position * bary.z;
+    vec3 normal   = normalize(v0.normal * bary.x + v1.normal * bary.y + v2.normal * bary.z);
+    const vec2 texCoord = v0.texCoord * bary.x + v1.texCoord * bary.y + v2.texCoord * bary.z;
+    vec3 tangent = normalize(v0.tangent * bary.x + v1.tangent * bary.y + v2.tangent * bary.z);
 
-    const Face face = unpackFace(gl_PrimitiveID);
-    
-    vec3 albedoColor = face.albedo;
-    if (face.diffuseTextureID != -1) {
-        // albedo textures are sRGB in glTF — if your texture image was uploaded as UNORM,
-        // convert to linear. If you used VK_FORMAT_R8G8B8A8_SRGB for the image, DO NOT pow().
-        vec3 tex = texture(nonuniformEXT(textures[nonuniformEXT(face.diffuseTextureID)]), texCoord).rgb;
-        // If your textures are in UNORM, linearize:
-        albedoColor = pow(tex, vec3(2.2)); // remove if texture was created as SRGB format
+    // First get the material index, then unpack
+    uint materialIndex = materialIndices[gl_PrimitiveID];
+    const Material material = unpackMaterial(materialIndex);
+
+    // --- Albedo (UNORM -> must linearize) ---
+    vec3 albedoColor = material.albedo;
+    float alpha = material.alpha;
+    if (material.diffuseTextureID != -1) {
+        vec4 tex = texture(nonuniformEXT(textures[nonuniformEXT(material.diffuseTextureID)]), texCoord);
+        albedoColor = pow(tex.rgb, vec3(2.2));
+        alpha *= tex.a;
     }
 
-    float metallic = face.metallic;
-    float roughness = face.roughness;
-
-    if (face.metallicRoughnessTextureID != -1) {
-        // glTF: R = occlusion, G = roughness, B = metallic (all linear)
-        vec4 mr = texture(nonuniformEXT(textures[nonuniformEXT(face.metallicRoughnessTextureID)]), texCoord);
-        // multiply/scalar-combine or override (choose workflow). We multiply to keep factor scales:
+    // --- Metallic/Roughness (stay linear, no gamma) ---
+    float metallic  = material.metallic;
+    float roughness = material.roughness;
+    if (material.metalRoughTextureID != -1) {
+        vec4 mr = texture(nonuniformEXT(textures[nonuniformEXT(material.metalRoughTextureID)]), texCoord);
         roughness *= mr.g;
         metallic  *= mr.b;
     }
 
-    // Normal mapping
+    // --- Normal map (stay linear, no gamma) ---
     vec3 finalNormal = normal;
-    if (face.normalTextureID != -1) {
-        vec3 nmap = texture(nonuniformEXT(textures[nonuniformEXT(face.normalTextureID)]), texCoord).rgb;
-        nmap = nmap * 2.0 - 1.0; // unpack to [-1,1]
-        // build orthonormal TBN (assume tangent is roughly orthogonal)
+    if (material.normalTextureID != -1) {
+        // ... (Normal mapping logic unchanged, just use material.normalTextureID) ...
+        vec3 nmap = texture(nonuniformEXT(textures[nonuniformEXT(material.normalTextureID)]), texCoord).rgb;
+        nmap = nmap * 2.0 - 1.0;
         vec3 T = normalize(tangent - normal * dot(normal, tangent));
         vec3 B = cross(normal, T);
         mat3 TBN = mat3(T, B, normal);
         finalNormal = normalize(TBN * nmap);
     }
 
-    // write payload
+    // --- Write payload ---
     payload.albedo        = albedoColor;
-    payload.emission      = face.emission;
+    payload.emission      = material.emission; // Use material.
     payload.position      = position;
     payload.normal        = finalNormal;
-    payload.roughness     = roughness;
-    payload.ior           = face.ior;
-    payload.metallic      = metallic;
-    payload.alpha         = face.alpha;
-    payload.material_type = face.material_type;
+    payload.roughness     = clamp(roughness, 0.01, 1.0);
+    payload.ior           = material.ior;
+    payload.metallic      = clamp(metallic, 0.0, 1.0);
+    payload.alpha         = clamp(alpha, 0.0, 1.0);
+    payload.material_type = material.material_type;
     payload.done          = false;
 }
