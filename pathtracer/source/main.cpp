@@ -22,6 +22,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 ///////////// MODEL LOADER /////////////
 
 std::string MODEL_TO_LOAD = "main_sponza/NewSponza_Main_glTF_003.gltf";
+//std::string MODEL_TO_LOAD = "helmet/DamagedHelmet.gltf";
 
 ////////////////////////////////////////
 
@@ -133,6 +134,8 @@ int main() {
         textures.push_back(createTexture(context, filePath));
     }
 
+    int a = sizeof(Face);
+
     Buffer vertexBuffer{ context, Buffer::Type::AccelInput, sizeof(Vertex) * vertices.size(), vertices.data() };
     Buffer indexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * indices.size(), indices.data() };
     Buffer faceBuffer{ context, Buffer::Type::AccelInput, sizeof(Face) * faces.size(), faces.data() };
@@ -230,12 +233,12 @@ int main() {
 
     // create ray tracing pipeline
     std::vector<vk::DescriptorSetLayoutBinding> bindings{
-        {0, vk::DescriptorType::eAccelerationStructureKHR, 1, vk::ShaderStageFlagBits::eRaygenKHR},             // TLAS
-        {1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eRaygenKHR},                         // Storage image
-        {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // Vertices
-        {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // Indices
-        {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // Faces
-        {5, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // Textures
+        {0, vk::DescriptorType::eAccelerationStructureKHR, 1, vk::ShaderStageFlagBits::eRaygenKHR},             // 0 = TLAS
+        {1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eRaygenKHR},                         // 1 = Storage image
+        {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 2 = Vertices
+        {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 3 = Indices
+        {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 4 = Faces
+        {5, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // 5 = Textures
     };
 
     // Create desc set layout

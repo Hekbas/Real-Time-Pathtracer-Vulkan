@@ -1,4 +1,6 @@
 #include "model_loader.h"
+#include "math/vec2.h"
+#include "math/vec3.h"
 #include "math/mat3.h"
 #include "math/mat4.h"
 
@@ -95,40 +97,34 @@ void processNode(
     std::unordered_map<std::string, int>& textureIndexMap,
     std::vector<std::string>& textureFiles,
     const std::string& modelDir,
-    uint32_t& vertexOffset) {
-
-    // Calculate current node's transformation matrix
+    uint32_t& vertexOffset)
+{
+    // Node transform
     Mat4 nodeMatrix = getNodeMatrix(node);
     Mat4 worldMatrix = parentMatrix * nodeMatrix;
 
-    // Extract the 3x3 part for normal transformation (inverse transpose)
     Mat3 worldMatrix3x3;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
             worldMatrix3x3.m[i][j] = worldMatrix.m[i][j];
-        }
-    }
-
-    // Calculate inverse transpose for normal transformation
     Mat3 inverseTranspose = worldMatrix3x3.inverse();
 
-    // Process mesh if this node has one
+    // Mesh
     if (node.mesh >= 0) {
         const auto& mesh = model.meshes[node.mesh];
 
         for (const auto& primitive : mesh.primitives) {
-            // Skip non-triangle primitives
             if (primitive.mode != TINYGLTF_MODE_TRIANGLES) continue;
 
-            // Get indices
+            // --- Indices ---
             const auto& indexAccessor = model.accessors[primitive.indices];
             const auto& indexBufferView = model.bufferViews[indexAccessor.bufferView];
             const auto& indexBuffer = model.buffers[indexBufferView.buffer];
             const uint8_t* indexData = indexBuffer.data.data() + indexBufferView.byteOffset + indexAccessor.byteOffset;
             uint32_t indexCount = indexAccessor.count;
 
-            // Extract indices
             std::vector<uint32_t> primitiveIndices;
+            primitiveIndices.reserve(indexCount);
             if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
                 const uint16_t* src = reinterpret_cast<const uint16_t*>(indexData);
                 primitiveIndices.assign(src, src + indexCount);
@@ -138,155 +134,215 @@ void processNode(
                 primitiveIndices.assign(src, src + indexCount);
             }
 
-            // Get vertex attributes
+            // --- Attributes ---
             const float* positionPtr = nullptr;
             const float* normalPtr = nullptr;
             const float* texCoordPtr = nullptr;
+            const float* tangentPtr = nullptr;
             size_t vertexCount = 0;
 
-            if (primitive.attributes.find("POSITION") != primitive.attributes.end()) {
-                const auto& accessor = model.accessors[primitive.attributes.at("POSITION")];
+            if (primitive.attributes.count("POSITION")) {
+                const auto& accessor = model.accessors.at(primitive.attributes.at("POSITION"));
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 positionPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
                 vertexCount = accessor.count;
             }
-
-            if (primitive.attributes.find("NORMAL") != primitive.attributes.end()) {
-                const auto& accessor = model.accessors[primitive.attributes.at("NORMAL")];
+            if (primitive.attributes.count("NORMAL")) {
+                const auto& accessor = model.accessors.at(primitive.attributes.at("NORMAL"));
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 normalPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
             }
-
-            if (primitive.attributes.find("TEXCOORD_0") != primitive.attributes.end()) {
-                const auto& accessor = model.accessors[primitive.attributes.at("TEXCOORD_0")];
+            if (primitive.attributes.count("TEXCOORD_0")) {
+                const auto& accessor = model.accessors.at(primitive.attributes.at("TEXCOORD_0"));
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
                 texCoordPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
             }
+            if (primitive.attributes.count("TANGENT")) {
+                const auto& accessor = model.accessors.at(primitive.attributes.at("TANGENT"));
+                const auto& bufferView = model.bufferViews[accessor.bufferView];
+                const auto& buffer = model.buffers[bufferView.buffer];
+                tangentPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
+            }
 
-            // Create vertices with transformations applied
+            // --- Tangent computation if missing ---
+            std::vector<Vec3> tempTangents;
+            if (!tangentPtr && vertexCount > 0) {
+                tempTangents.assign(vertexCount, Vec3{ 0,0,0 });
+                for (size_t t = 0; t + 2 < primitiveIndices.size(); t += 3) {
+                    uint32_t ia = primitiveIndices[t + 0];
+                    uint32_t ib = primitiveIndices[t + 1];
+                    uint32_t ic = primitiveIndices[t + 2];
+                    Vec3 p0(positionPtr[3 * ia + 0], positionPtr[3 * ia + 1], positionPtr[3 * ia + 2]);
+                    Vec3 p1(positionPtr[3 * ib + 0], positionPtr[3 * ib + 1], positionPtr[3 * ib + 2]);
+                    Vec3 p2(positionPtr[3 * ic + 0], positionPtr[3 * ic + 1], positionPtr[3 * ic + 2]);
+                    Vec2 uv0(texCoordPtr ? texCoordPtr[2 * ia + 0] : 0, texCoordPtr ? texCoordPtr[2 * ia + 1] : 0);
+                    Vec2 uv1(texCoordPtr ? texCoordPtr[2 * ib + 0] : 0, texCoordPtr ? texCoordPtr[2 * ib + 1] : 0);
+                    Vec2 uv2(texCoordPtr ? texCoordPtr[2 * ic + 0] : 0, texCoordPtr ? texCoordPtr[2 * ic + 1] : 0);
+                    Vec3 e1 = p1 - p0;
+                    Vec3 e2 = p2 - p0;
+                    Vec2 duv1 = uv1 - uv0;
+                    Vec2 duv2 = uv2 - uv0;
+                    float r = duv1.x * duv2.y - duv1.y * duv2.x;
+                    if (fabs(r) < 1e-8f) continue;
+                    float invR = 1.0f / r;
+                    Vec3 tangent = (e1 * duv2.y - e2 * duv1.y) * invR;
+                    tempTangents[ia] += tangent;
+                    tempTangents[ib] += tangent;
+                    tempTangents[ic] += tangent;
+                }
+            }
+
+            // --- Push vertices ---
             for (size_t i = 0; i < vertexCount; ++i) {
-                Vertex vertex;
-
-                // Transform position
-                Vec3 pos(positionPtr[3 * i], positionPtr[3 * i + 1], positionPtr[3 * i + 2]);
-                vertex.position = worldMatrix.transformPoint(pos);
-
-                // Transform normal
+                Vertex v{};
+                // pos
+                Vec3 pos(positionPtr[3 * i + 0], positionPtr[3 * i + 1], positionPtr[3 * i + 2]);
+                Vec3 worldPos = worldMatrix.transformPoint(pos);
+                v.position.x = worldPos.x; v.position.y = worldPos.y; v.position.z = worldPos.z;
+                // normal
                 if (normalPtr) {
-                    Vec3 norm(normalPtr[3 * i], normalPtr[3 * i + 1], normalPtr[3 * i + 2]);
-                    // Apply inverse transpose transformation for normals
-                    norm = Vec3(
-                        inverseTranspose.m[0][0] * norm.x + inverseTranspose.m[1][0] * norm.y + inverseTranspose.m[2][0] * norm.z,
-                        inverseTranspose.m[0][1] * norm.x + inverseTranspose.m[1][1] * norm.y + inverseTranspose.m[2][1] * norm.z,
-                        inverseTranspose.m[0][2] * norm.x + inverseTranspose.m[1][2] * norm.y + inverseTranspose.m[2][2] * norm.z
-                    );
-                    vertex.normal = norm.normalized();
+                    Vec3 n(normalPtr[3 * i + 0], normalPtr[3 * i + 1], normalPtr[3 * i + 2]);
+                    n = inverseTranspose * n;
+                    v.normal.x = n.x; v.normal.y = n.y; v.normal.z = n.z;
                 }
-                else {
-                    vertex.normal = Vec3{ 0.0f, 0.0f, 0.0f };
-                }
-
+                // texcoord
                 if (texCoordPtr) {
-                    vertex.texCoord[0] = texCoordPtr[2 * i];
-                    vertex.texCoord[1] = texCoordPtr[2 * i + 1];
+                    v.texCoord[0] = texCoordPtr[2 * i + 0];
+                    v.texCoord[1] = texCoordPtr[2 * i + 1];
+                }
+                // tangent
+                if (tangentPtr) {
+                    v.tangent.x = tangentPtr[4 * i + 0];
+                    v.tangent.y = tangentPtr[4 * i + 1];
+                    v.tangent.z = tangentPtr[4 * i + 2];
+                }
+                else if (!tempTangents.empty()) {
+                    Vec3 T = tempTangents[i];
+                    Vec3 N(v.normal.x, v.normal.y, v.normal.z);
+                    if (T.length() > 1e-6f) T = normalize(T - N * dot(N, T));
+                    else {
+                        Vec3 up = fabs(N.y) < 0.999f ? Vec3{ 0,1,0 } : Vec3{ 1,0,0 };
+                        T = normalize(cross(up, N));
+                    }
+                    v.tangent.x = T.x; v.tangent.y = T.y; v.tangent.z = T.z;
                 }
                 else {
-                    vertex.texCoord[0] = 0.0f;
-                    vertex.texCoord[1] = 0.0f;
+                    v.tangent.x = 1; v.tangent.y = 0; v.tangent.z = 0;
                 }
-
-                vertices.push_back(vertex);
+                vertices.push_back(v);
             }
 
-            // Adjust indices and add to global list
-            for (uint32_t index : primitiveIndices) {
-                indices.push_back(vertexOffset + index);
-            }
+            // --- Indices (global offset) ---
+            for (uint32_t idx : primitiveIndices)
+                indices.push_back(vertexOffset + idx);
 
-            // Process material
-            Face face;
-            // Set default values
-            face.albedo = Vec3{ 0.8f, 0.8f, 0.8f };
-            face.emission = Vec3{ 0.0f, 0.0f, 0.0f };
-            face.diffuseTextureID = -1;
-            face.material_type = 0;
-            face.roughness = 1.0f;
-            face.ior = 1.5f;
+            // --- Material baseFace ---
+            Face baseFace{};
+            baseFace.albedo.x = 0.8f; baseFace.albedo.y = 0.8f; baseFace.albedo.z = 0.8f;
+            baseFace.emission.x = baseFace.emission.y = baseFace.emission.z = 0.0f;
+            baseFace.diffuseTextureID = uint32_t(-1);
+            baseFace.material_type = 0;
+            baseFace.roughness = 1.0f;
+            baseFace.ior = 1.5f;
+            baseFace.metallic = 0.0f;
+            baseFace.alpha = 1.0f;
+            baseFace.area = 0.0f;
+            baseFace.metalRoughTextureID = uint32_t(-1);
+            baseFace.normalTextureID = uint32_t(-1);
+			baseFace.pad0 = 0.0f;
 
             if (primitive.material >= 0) {
                 const auto& material = model.materials[primitive.material];
                 const auto& pbr = material.pbrMetallicRoughness;
 
-                // Albedo
                 if (pbr.baseColorFactor.size() >= 3) {
-                    face.albedo = Vec3{
-                        static_cast<float>(pbr.baseColorFactor[0]),
-                        static_cast<float>(pbr.baseColorFactor[1]),
-                        static_cast<float>(pbr.baseColorFactor[2])
-                    };
+                    baseFace.albedo.x = (float)pbr.baseColorFactor[0];
+                    baseFace.albedo.y = (float)pbr.baseColorFactor[1];
+                    baseFace.albedo.z = (float)pbr.baseColorFactor[2];
+                }
+                if (pbr.baseColorFactor.size() == 4)
+                    baseFace.alpha = (float)pbr.baseColorFactor[3];
+
+                if (material.emissiveFactor.size() == 3) {
+                    baseFace.emission.x = (float)material.emissiveFactor[0];
+                    baseFace.emission.y = (float)material.emissiveFactor[1];
+                    baseFace.emission.z = (float)material.emissiveFactor[2];
                 }
 
-                // Emission
-                if (material.emissiveFactor.size() >= 3) {
-                    face.emission = Vec3{
-                        static_cast<float>(material.emissiveFactor[0]),
-                        static_cast<float>(material.emissiveFactor[1]),
-                        static_cast<float>(material.emissiveFactor[2])
-                    };
-                }
-
-                // Diffuse texture
+                // baseColorTexture
                 if (pbr.baseColorTexture.index >= 0) {
-                    const auto& texture = model.textures[pbr.baseColorTexture.index];
-                    const auto& image = model.images[texture.source];
-
-                    std::string uri = image.uri;
-                    std::filesystem::path texturePath(uri);
-                    std::string absolutePath;
-
-                    if (texturePath.is_absolute()) {
-                        absolutePath = uri;
+                    const auto& tex = model.textures[pbr.baseColorTexture.index];
+                    const auto& img = model.images[tex.source];
+                    std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                    if (!textureIndexMap.count(path)) {
+                        textureIndexMap[path] = (int)textureFiles.size();
+                        textureFiles.push_back(path);
                     }
-                    else {
-                        absolutePath = (std::filesystem::path(modelDir) / uri).string();
-                    }
-
-                    if (textureIndexMap.find(absolutePath) == textureIndexMap.end()) {
-                        textureIndexMap[absolutePath] = static_cast<int>(textureFiles.size());
-                        textureFiles.push_back(absolutePath);
-                    }
-                    face.diffuseTextureID = textureIndexMap[absolutePath];
+                    baseFace.diffuseTextureID = textureIndexMap[path];
                 }
 
-                // Roughness
-                face.roughness = static_cast<float>(pbr.roughnessFactor);
+                baseFace.roughness = (float)pbr.roughnessFactor;
+                baseFace.metallic = (float)pbr.metallicFactor;
 
-                // IOR from extension
-                if (material.extensions.find("KHR_materials_ior") != material.extensions.end()) {
-                    const auto& iorExtension = material.extensions.at("KHR_materials_ior");
-                    if (iorExtension.Has("ior")) {
-                        face.ior = static_cast<float>(iorExtension.Get("ior").Get<double>());
+                // metallicRoughnessTexture
+                if (pbr.metallicRoughnessTexture.index >= 0) {
+                    const auto& tex = model.textures[pbr.metallicRoughnessTexture.index];
+                    const auto& img = model.images[tex.source];
+                    std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                    if (!textureIndexMap.count(path)) {
+                        textureIndexMap[path] = (int)textureFiles.size();
+                        textureFiles.push_back(path);
                     }
+                    baseFace.metalRoughTextureID = textureIndexMap[path];
+                }
+
+                // normalTexture
+                if (material.normalTexture.index >= 0) {
+                    const auto& tex = model.textures[material.normalTexture.index];
+                    const auto& img = model.images[tex.source];
+                    std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                    if (!textureIndexMap.count(path)) {
+                        textureIndexMap[path] = (int)textureFiles.size();
+                        textureFiles.push_back(path);
+                    }
+                    baseFace.normalTextureID = textureIndexMap[path];
+                }
+
+                // IOR (extension)
+                if (material.extensions.count("KHR_materials_ior")) {
+                    const auto& ext = material.extensions.at("KHR_materials_ior");
+                    if (ext.Has("ior"))
+                        baseFace.ior = (float)ext.Get("ior").Get<double>();
                 }
             }
-            faces.push_back(face);
 
-            vertexOffset += vertexCount;
+            // --- Faces: one per triangle ---
+            size_t triCount = primitiveIndices.size() / 3;
+            for (size_t t = 0; t < triCount; t++) {
+                uint32_t ia = vertexOffset + primitiveIndices[3 * t + 0];
+                uint32_t ib = vertexOffset + primitiveIndices[3 * t + 1];
+                uint32_t ic = vertexOffset + primitiveIndices[3 * t + 2];
+                Vec3 p0(vertices[ia].position.x, vertices[ia].position.y, vertices[ia].position.z);
+                Vec3 p1(vertices[ib].position.x, vertices[ib].position.y, vertices[ib].position.z);
+                Vec3 p2(vertices[ic].position.x, vertices[ic].position.y, vertices[ic].position.z);
+                float area = 0.5f * cross(p1 - p0, p2 - p0).length();
+                baseFace.area = area;
+                faces.push_back(baseFace);
+            }
+
+            vertexOffset += (uint32_t)vertexCount;
         }
     }
 
-    // Process child nodes
-    for (int childIndex : node.children) {
-        processNode(
-            model, model.nodes[childIndex], worldMatrix,
-            vertices, indices, faces, textureIndexMap, textureFiles,
-            modelDir, vertexOffset
-        );
-    }
+    for (int child : node.children)
+        processNode(model, model.nodes[child], worldMatrix,
+            vertices, indices, faces,
+            textureIndexMap, textureFiles, modelDir, vertexOffset);
 }
+
 
 void loadFromFile(
     std::vector<Vertex>& vertices,

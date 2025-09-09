@@ -24,7 +24,7 @@ Texture createTexture(const Context& context, const std::string& path) {
     vk::Extent2D extent = { (uint32_t)texWidth, (uint32_t)texHeight };
     vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled;
     // We pass eUndefined to prevent the automatic layout transition
-    Image gpuImage(context, extent, vk::Format::eR8G8B8A8Srgb, usage, vk::ImageLayout::eUndefined);
+    Image gpuImage(context, extent, vk::Format::eR8G8B8A8Unorm, usage, vk::ImageLayout::eUndefined);
 
     // 4. Copy data from staging buffer to GPU image and set the correct layout for shaders
     context.oneTimeSubmit([&](vk::CommandBuffer cmd) {

@@ -4,7 +4,8 @@
 #include "common.glsl"
 
 layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevelAS;
-layout(binding = 1, set = 0, rgba8) uniform image2D outputImage;
+layout(binding = 1, set = 0, rgba32f) uniform image2D accumImage;   // linear float accumulation buffer
+layout(binding = 2, set = 0, rgba8)   uniform image2D outputImage;  // final display buffer (gamma applied)
 
 layout(push_constant) uniform PushConstants {
     int frame;
@@ -16,162 +17,120 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) rayPayloadEXT HitPayload payload;
 
-void createCoordinateSystem(in vec3 N, out vec3 T, out vec3 B) {
-    if(abs(N.x) > abs(N.y))
-        T = vec3(N.z, 0, -N.x) / sqrt(N.x * N.x + N.z * N.z);
-    else
-        T = vec3(0, -N.z, N.y) / sqrt(N.y * N.y + N.z * N.z);
-    B = cross(N, T);
-}
-
-vec3 sampleHemisphere(float rand1, float rand2) {
-    vec3 dir;
-    dir.x = cos(2 * M_PI * rand2) * sqrt(1 - rand1 * rand1);
-    dir.y = sin(2 * M_PI * rand2) * sqrt(1 - rand1 * rand1);
-    dir.z = rand1;
-    return dir;
-}
-
-vec3 sampleDirection(float rand1, float rand2, vec3 normal) {
-    vec3 tangent;
-    vec3 bitangent;
-    createCoordinateSystem(normal, tangent, bitangent);
-    vec3 dir = sampleHemisphere(rand1, rand2);
-    return dir.x * tangent + dir.y * bitangent + dir.z * normal;
-}
-
-vec3 random_in_unit_sphere(inout uint seed) {
-    vec3 p;
-    do {
-        p = 2.0 * vec3(rand(seed), rand(seed), rand(seed)) - vec3(1.0);
-    } while (dot(p, p) >= 1.0);
-    return p;
-}
-
-// Schlick's approximation for Fresnel effect
-float schlick(float cosine, float ref_idx) {
-    float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
-    r0 = r0 * r0;
-    return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
-}
-
 void main()
 {
-    // SPP for anti-aliasing
-    int maxSamples = 4;
-    vec3 color = vec3(0.0);
-    for(uint sampleNum = 0; sampleNum < maxSamples; sampleNum++) {
-        // Unique random seed per sample/frame
-        uvec2 s = pcg2d(ivec2(gl_LaunchIDEXT.xy) * (sampleNum + maxSamples * pc.frame + 1));
-        uint seed = s.x + s.y;
+    ivec2 pix = ivec2(gl_LaunchIDEXT.xy);
+    ivec2 size = ivec2(gl_LaunchSizeEXT.xy);
 
-        // Calc ray + AA Jitter
-        const vec2 screenPos = vec2(gl_LaunchIDEXT.xy) + vec2(rand(seed), rand(seed));
-        const vec2 inUV = screenPos / vec2(gl_LaunchSizeEXT.xy);
+    const int maxSamples = 4; // spp per frame
+    vec3 sampleAccum = vec3(0.0);
+
+    for (uint s = 0u; s < uint(maxSamples); ++s) {
+        // RNG seed
+        uvec2 seed2 = pcg2d(ivec2(gl_LaunchIDEXT.xy) * (int(s) + maxSamples * pc.frame + 1));
+        uint seed = seed2.x ^ seed2.y;
+
+        // jittered AA
+        vec2 jitter = vec2(rand(seed), rand(seed));
+        vec2 inUV = (vec2(pix) + jitter) / vec2(size);
         vec2 d = inUV * 2.0 - 1.0;
-        float aspect_ratio = float(gl_LaunchSizeEXT.x) / float(gl_LaunchSizeEXT.y);
-        float fov = 70.0; 
-        float tan_fov = tan(radians(fov * 0.5));
+        float aspect = float(size.x) / float(size.y);
+        float fov = 70.0;
+        float tanFov = tan(radians(fov * 0.5));
         vec3 rayDir = normalize(
             pc.cameraFront +
-            pc.cameraRight * d.x * aspect_ratio * tan_fov +
-            pc.cameraUp    * d.y * tan_fov
+            pc.cameraRight * d.x * aspect * tanFov +
+            pc.cameraUp    * d.y * tanFov
         );
 
-        // Initial ray properties
-        vec3 origin    = pc.cameraPos;
+        // Path state
+        vec3 origin = pc.cameraPos;
         vec3 direction = rayDir;
-        vec3 weight = vec3(5.0);
-        payload.done = false;
+        vec3 throughput = vec3(1.0);
+        vec3 radiance = vec3(0.0);
 
-        // --- Path Tracing Loop ---
-        for(uint depth = 0; depth < 8; depth++) {
-            traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xff, 0, 0, 0, origin, 0.001, direction, 10000.0, 0);
+        // Path tracing loop
+        for (int depth = 0; depth < 6; ++depth) {
+            traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0,
+                        origin, 0.001, direction, 1e20, 0);
 
-            // Add emitted light from hit surface (or sky)
-            color += weight * payload.emission;
+            radiance += throughput * payload.emission;
+            if (payload.done) break;
 
-            if(payload.done) {
-                break;
+            // shading basis
+            vec3 N = normalize(payload.normal);
+            vec3 V = normalize(-direction);
+            vec3 albedo = payload.albedo;
+            float metallic = payload.metallic;
+            float roughness = payload.roughness;
+
+            // alpha test
+            if (payload.alpha < 0.99 && rand(seed) > payload.alpha) {
+                origin = payload.position + direction * 0.001;
+                continue;
             }
 
-            // Prepare for next bounce
-            origin = payload.position;
-            vec3 attenuation;
-            vec3 scattered_dir;
+            // Dielectric (refraction)
+            if (payload.material_type == MAT_DIELECTRIC) {
+                vec3 I = normalize(direction);
+                vec3 Nl = N;
+                float eta = payload.ior;
+                float cosi = dot(I, N);
+                float ni_over_nt = (cosi > 0.0) ? eta : 1.0 / eta;
+                if (cosi > 0.0) Nl = -N;
 
-            switch(payload.material_type) {
-                // --- Case 1: Lambertian (Diffuse) ---
-                case MAT_LAMBERTIAN: {
-                    scattered_dir = payload.normal + random_in_unit_sphere(seed);
-                    attenuation = payload.albedo;
-                    weight *= attenuation;
-                    direction = normalize(scattered_dir);
-                    break;
-                }
+                vec3 refr = refract(I, Nl, ni_over_nt);
+                float reflectProb = saturate(schlickFresnel(abs(cosi), 0.04));
+                if (refr == vec3(0.0) || rand(seed) < reflectProb)
+                    direction = reflect(I, N);
+                else
+                    direction = refr;
 
-                // --- Case 2: Metal (Reflective) ---
-                case MAT_METAL: {
-                    vec3 reflected = reflect(direction, payload.normal);
-                    scattered_dir = normalize(reflected + payload.roughness * random_in_unit_sphere(seed));
-                    attenuation = payload.albedo;
-                    if (dot(scattered_dir, payload.normal) > 0) {
-                        weight *= attenuation;
-                        direction = scattered_dir;
-                    } else {
-                        // Ray is absorbed if it scatters below the surface
-                        weight = vec3(0.0); 
-                    }
-                    break;
-                }
-
-                // --- Case 3: Dielectric (Refractive) ---
-                case MAT_DIELECTRIC: {
-                    vec3 incoming_dir = normalize(direction);
-                    vec3 outward_normal;
-                    float ni_over_nt;
-                    float cosine;
-                    float reflect_prob;
-                    
-                    attenuation = vec3(1.0); // Perfect glass doesn't attenuate
-
-                    if (dot(incoming_dir, payload.normal) > 0) { // Ray is inside the medium
-                        outward_normal = -payload.normal;
-                        ni_over_nt = payload.ior;
-                        cosine = payload.ior * dot(incoming_dir, payload.normal);
-                    } else { // Ray is outside the medium
-                        outward_normal = payload.normal;
-                        ni_over_nt = 1.0 / payload.ior;
-                        cosine = -dot(incoming_dir, payload.normal);
-                    }
-                    
-                    vec3 refracted = refract(incoming_dir, outward_normal, ni_over_nt);
-                    if (refracted != vec3(0.0)) { // Check for total internal reflection
-                        reflect_prob = schlick(cosine, payload.ior);
-                    } else {
-                        reflect_prob = 1.0;
-                    }
-
-                    if (rand(seed) < reflect_prob) {
-                        direction = reflect(incoming_dir, payload.normal);
-                    } else {
-                        direction = refracted;
-                    }
-                    weight *= attenuation;
-                    break;
-                }
+                origin = payload.position + direction * 0.001;
+                continue;
             }
-            
-            // Terminate ray if its contribution is negligible
-            if(max(weight.x, max(weight.y, weight.z)) < 0.01){
-                break;
+
+            // Sample diffuse or specular
+            float chooseSpec = rand(seed);
+            vec3 Lsample;
+            float pdf = 1.0;
+            if (chooseSpec < clamp(metallic + (1.0 - roughness) * 0.5, 0.0, 1.0)) {
+                Lsample = sampleGGX(N, V, roughness, seed);
+                pdf = max(pdfGGX(N, V, Lsample, roughness), 1e-6);
+            } else {
+                Lsample = sampleCosineHemisphere(N, seed);
+                pdf = max(pdfCosineHemisphere(max(dot(N, Lsample), 0.0)), 1e-6);
             }
+
+            float NdotL = max(dot(N, Lsample), 0.0);
+            if (NdotL <= 0.0) break;
+
+            vec3 f = evalBRDF(N, V, Lsample, albedo, metallic, roughness);
+
+            direction = normalize(Lsample);
+            origin = payload.position + direction * 0.001;
+            throughput *= f * (NdotL / pdf);
+
+            // Russian roulette
+            if (depth > 3) {
+                float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+                if (rand(seed) > p) break;
+                throughput /= p;
+            }
+            if (max(throughput.r, max(throughput.g, throughput.b)) < 1e-4) break;
         }
+
+        sampleAccum += radiance;
     }
-    color /= maxSamples;
-    
-    // Temporal accumulation
-    vec4 oldColor = imageLoad(outputImage, ivec2(gl_LaunchIDEXT.xy));
-    vec4 newColor = (vec4(color, 1.0) + (oldColor * pc.frame)) / (pc.frame + 1);
-    imageStore(outputImage, ivec2(gl_LaunchIDEXT.xy), newColor);
+
+    sampleAccum /= float(maxSamples); // avg this frame’s spp
+
+    // --- Temporal accumulation (keep in linear) ---
+    vec4 prev = imageLoad(accumImage, pix);
+    vec3 linearAccum = (prev.rgb * float(pc.frame) + sampleAccum) / float(pc.frame + 1);
+    imageStore(accumImage, pix, vec4(linearAccum, 1.0));
+
+    // --- Final display with gamma correction (only once) ---
+    vec3 display = pow(linearAccum, vec3(1.0 / 2.2));
+    imageStore(outputImage, pix, vec4(display, 1.0));
 }
