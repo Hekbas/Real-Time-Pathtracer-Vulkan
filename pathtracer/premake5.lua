@@ -7,22 +7,26 @@ project "Pathtracer"
     files {
         "source/**.h",
         "source/**.cpp",
-        "source/**.hpp"
+        "source/**.hpp",
+        "../extern/source/tinygltf/tiny_gltf.h",
+        "../extern/source/stb/stb_image.h",
+        "../extern/source/stb/stb_image_write.h",
+        "../extern/source/json/json.hpp"
     }
     
     includedirs {
         "source",
         "../extern/source/glfw/include",
-        "../extern/source/tinyobjloader",
+        "../extern/source/tinygltf",
         "../extern/source/stb",
+        "../extern/source/json",
         "../extern/source",
         os.getenv("VULKAN_SDK") and (os.getenv("VULKAN_SDK") .. "/Include") or "",
         "."
     }
     
     links {
-        "glfw",
-        "tinyobjloader"
+        "glfw"
     }
     
     filter "system:windows"

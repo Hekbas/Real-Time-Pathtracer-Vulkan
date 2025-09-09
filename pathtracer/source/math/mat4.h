@@ -1,6 +1,7 @@
 #pragma once
-#include <cmath>
 #include "vec3.h"
+#include "vec4.h"
+#include "mat3.h"
 
 struct Mat4 {
     float m[4][4];
@@ -109,144 +110,38 @@ struct Mat4 {
         return result;
     }
 
-    // Transform Vec3 (assumes w = 1)
-    Vec3 transformPoint(const Vec3& v) const {
-        float x = v.x * m[0][0] + v.y * m[1][0] + v.z * m[2][0] + m[3][0];
-        float y = v.x * m[0][1] + v.y * m[1][1] + v.z * m[2][1] + m[3][1];
-        float z = v.x * m[0][2] + v.y * m[1][2] + v.z * m[2][2] + m[3][2];
-        float w = v.x * m[0][3] + v.y * m[1][3] + v.z * m[2][3] + m[3][3];
-        if (w != 0.0f) { x /= w; y /= w; z /= w; }
-        return { x, y, z };
+    Vec4 operator*(const Vec4& v) const {
+        return Vec4(
+            m[0][0] * v.x + m[1][0] * v.y + m[2][0] * v.z + m[3][0] * v.w,
+            m[0][1] * v.x + m[1][1] * v.y + m[2][1] * v.z + m[3][1] * v.w,
+            m[0][2] * v.x + m[1][2] * v.y + m[2][2] * v.z + m[3][2] * v.w,
+            m[0][3] * v.x + m[1][3] * v.y + m[2][3] * v.z + m[3][3] * v.w
+        );
     }
 
-    // General 4x4 inverse (not the fastest, but works :3)
-    Mat4 inverse() const {
-        Mat4 inv;
-        const float* a = &m[0][0];
-        float invOut[16];
+    // Transform Vec3 (assumes w = 1)
+    Vec3 transformPoint(const Vec3& v) const {
+        Vec4 result = *this * Vec4(v, 1.0f);
+        if (result.w != 0.0f) {
+            return Vec3(result.x / result.w, result.y / result.w, result.z / result.w);
+        }
+        return Vec3(result.x, result.y, result.z);
+    }
 
-        invOut[0] = a[5] * a[10] * a[15] -
-            a[5] * a[11] * a[14] -
-            a[9] * a[6] * a[15] +
-            a[9] * a[7] * a[14] +
-            a[13] * a[6] * a[11] -
-            a[13] * a[7] * a[10];
+    // Transform Vec3 as vector (assumes w = 0)
+    Vec3 transformVector(const Vec3& v) const {
+        Vec4 result = *this * Vec4(v, 0.0f);
+        return Vec3(result.x, result.y, result.z);
+    }
 
-        invOut[4] = -a[4] * a[10] * a[15] +
-            a[4] * a[11] * a[14] +
-            a[8] * a[6] * a[15] -
-            a[8] * a[7] * a[14] -
-            a[12] * a[6] * a[11] +
-            a[12] * a[7] * a[10];
-
-        invOut[8] = a[4] * a[9] * a[15] -
-            a[4] * a[11] * a[13] -
-            a[8] * a[5] * a[15] +
-            a[8] * a[7] * a[13] +
-            a[12] * a[5] * a[11] -
-            a[12] * a[7] * a[9];
-
-        invOut[12] = -a[4] * a[9] * a[14] +
-            a[4] * a[10] * a[13] +
-            a[8] * a[5] * a[14] -
-            a[8] * a[6] * a[13] -
-            a[12] * a[5] * a[10] +
-            a[12] * a[6] * a[9];
-
-        invOut[1] = -a[1] * a[10] * a[15] +
-            a[1] * a[11] * a[14] +
-            a[9] * a[2] * a[15] -
-            a[9] * a[3] * a[14] -
-            a[13] * a[2] * a[11] +
-            a[13] * a[3] * a[10];
-
-        invOut[5] = a[0] * a[10] * a[15] -
-            a[0] * a[11] * a[14] -
-            a[8] * a[2] * a[15] +
-            a[8] * a[3] * a[14] +
-            a[12] * a[2] * a[11] -
-            a[12] * a[3] * a[10];
-
-        invOut[9] = -a[0] * a[9] * a[15] +
-            a[0] * a[11] * a[13] +
-            a[8] * a[1] * a[15] -
-            a[8] * a[3] * a[13] -
-            a[12] * a[1] * a[11] +
-            a[12] * a[3] * a[9];
-
-        invOut[13] = a[0] * a[9] * a[14] -
-            a[0] * a[10] * a[13] -
-            a[8] * a[1] * a[14] +
-            a[8] * a[2] * a[13] +
-            a[12] * a[1] * a[10] -
-            a[12] * a[2] * a[9];
-
-        invOut[2] = a[1] * a[6] * a[15] -
-            a[1] * a[7] * a[14] -
-            a[5] * a[2] * a[15] +
-            a[5] * a[3] * a[14] +
-            a[13] * a[2] * a[7] -
-            a[13] * a[3] * a[6];
-
-        invOut[6] = -a[0] * a[6] * a[15] +
-            a[0] * a[7] * a[14] +
-            a[4] * a[2] * a[15] -
-            a[4] * a[3] * a[14] -
-            a[12] * a[2] * a[7] +
-            a[12] * a[3] * a[6];
-
-        invOut[10] = a[0] * a[5] * a[15] -
-            a[0] * a[7] * a[13] -
-            a[4] * a[1] * a[15] +
-            a[4] * a[3] * a[13] +
-            a[12] * a[1] * a[7] -
-            a[12] * a[3] * a[5];
-
-        invOut[14] = -a[0] * a[5] * a[14] +
-            a[0] * a[6] * a[13] +
-            a[4] * a[1] * a[14] -
-            a[4] * a[2] * a[13] -
-            a[12] * a[1] * a[6] +
-            a[12] * a[2] * a[5];
-
-        invOut[3] = -a[1] * a[6] * a[11] +
-            a[1] * a[7] * a[10] +
-            a[5] * a[2] * a[11] -
-            a[5] * a[3] * a[10] -
-            a[9] * a[2] * a[7] +
-            a[9] * a[3] * a[6];
-
-        invOut[7] = a[0] * a[6] * a[11] -
-            a[0] * a[7] * a[10] -
-            a[4] * a[2] * a[11] +
-            a[4] * a[3] * a[10] +
-            a[8] * a[2] * a[7] -
-            a[8] * a[3] * a[6];
-
-        invOut[11] = -a[0] * a[5] * a[11] +
-            a[0] * a[7] * a[9] +
-            a[4] * a[1] * a[11] -
-            a[4] * a[3] * a[9] -
-            a[8] * a[1] * a[7] +
-            a[8] * a[3] * a[5];
-
-        invOut[15] = a[0] * a[5] * a[10] -
-            a[0] * a[6] * a[9] -
-            a[4] * a[1] * a[10] +
-            a[4] * a[2] * a[9] +
-            a[8] * a[1] * a[6] -
-            a[8] * a[2] * a[5];
-
-        float det = a[0] * invOut[0] + a[1] * invOut[4] + a[2] * invOut[8] + a[3] * invOut[12];
-        if (det == 0.0f) return Mat4::identity(); // fallback
-
-        det = 1.0f / det;
-        for (int i = 0; i < 16; i++) invOut[i] *= det;
-
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++)
-                inv.m[i][j] = invOut[i * 4 + j];
-
-        return inv;
+    // Helper function to extract the 3x3 part of a matrix for normal transformation
+    Mat3 extract3x3(const Mat4& mat) {
+        Mat3 result;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                result.m[i][j] = mat.m[i][j];
+            }
+        }
+        return result;
     }
 };

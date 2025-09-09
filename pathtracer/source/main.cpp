@@ -21,7 +21,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 ///////////// MODEL LOADER /////////////
 
-std::string MODEL_TO_LOAD = "bugatti.obj";
+std::string MODEL_TO_LOAD = "main_sponza/NewSponza_Main_glTF_003.gltf";
 
 ////////////////////////////////////////
 
@@ -70,14 +70,14 @@ int main() {
 
     // 2. Initialize Vulkan context
     Context context;
-	context.initDevice(window);
+    context.initDevice(window);
 
     vk::SwapchainCreateInfoKHR swapchainInfo;
     swapchainInfo.setSurface(*context.surface);
     swapchainInfo.setMinImageCount(3);
     swapchainInfo.setImageFormat(vk::Format::eB8G8R8A8Unorm);
     swapchainInfo.setImageColorSpace(vk::ColorSpaceKHR::eSrgbNonlinear);
-    swapchainInfo.setImageExtent({WIDTH, HEIGHT});
+    swapchainInfo.setImageExtent({ WIDTH, HEIGHT });
     swapchainInfo.setImageArrayLayers(1);
     swapchainInfo.setImageUsage(vk::ImageUsageFlagBits::eTransferDst);
     swapchainInfo.setPreTransform(vk::SurfaceTransformFlagBitsKHR::eIdentity);
@@ -100,24 +100,43 @@ int main() {
         vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst
     };
 
-    // Load mesh
+    // Load model
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;
     std::vector<Face> faces;
     std::vector<std::string> textureFiles;
-	std::string modelPath = "../assets/models/" + MODEL_TO_LOAD;
+    std::vector<uint32_t> materialIndices;
+    std::string modelPath = "../assets/models/" + MODEL_TO_LOAD;
+
+    std::cout << "Loading model: " << modelPath << std::endl;
     loadFromFile(vertices, indices, faces, textureFiles, modelPath);
 
-	// Load textures
+    // Model loading validation
+    if (vertices.empty() || indices.empty()) {
+        throw std::runtime_error("No vertices or indices loaded from model");
+    }
+
+    std::cout << "Loaded " << vertices.size() << " vertices, "
+        << indices.size() << " indices, "
+        << faces.size() << " faces, "
+        << textureFiles.size() << " textures" << std::endl;
+
+    // quick runtime sanity check
+    if (materialIndices.size() != (indices.size() / 3)) {
+        std::cout << "materialIndices size mismatch: expected indices.size()/3" << std::endl;
+    }
+
+    // Load textures
     std::vector<Texture> textures;
     textures.reserve(textureFiles.size());
     for (const auto& filePath : textureFiles) {
         textures.push_back(createTexture(context, filePath));
     }
 
-    Buffer vertexBuffer{context, Buffer::Type::AccelInput, sizeof(Vertex) * vertices.size(), vertices.data()};
-    Buffer indexBuffer{context, Buffer::Type::AccelInput, sizeof(uint32_t) * indices.size(), indices.data()};
-    Buffer faceBuffer{context, Buffer::Type::AccelInput, sizeof(Face) * faces.size(), faces.data()};
+    Buffer vertexBuffer{ context, Buffer::Type::AccelInput, sizeof(Vertex) * vertices.size(), vertices.data() };
+    Buffer indexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * indices.size(), indices.data() };
+    Buffer faceBuffer{ context, Buffer::Type::AccelInput, sizeof(Face) * faces.size(), faces.data() };
+
 
     // Create bottom level accel struct
     vk::AccelerationStructureGeometryTrianglesDataKHR triangleData;
@@ -130,12 +149,12 @@ int main() {
 
     vk::AccelerationStructureGeometryKHR triangleGeometry;
     triangleGeometry.setGeometryType(vk::GeometryTypeKHR::eTriangles);
-    triangleGeometry.setGeometry({triangleData});
+    triangleGeometry.setGeometry({ triangleData });
     triangleGeometry.setFlags(vk::GeometryFlagBitsKHR::eOpaque);
 
     const auto primitiveCount = static_cast<uint32_t>(indices.size() / 3);
 
-    Accel bottomAccel{context, triangleGeometry, primitiveCount, vk::AccelerationStructureTypeKHR::eBottomLevel};
+    Accel bottomAccel{ context, triangleGeometry, primitiveCount, vk::AccelerationStructureTypeKHR::eBottomLevel };
 
     // Create top level accel struct
     vk::TransformMatrixKHR transformMatrix = std::array{
@@ -150,7 +169,16 @@ int main() {
     accelInstance.setAccelerationStructureReference(bottomAccel.buffer.deviceAddress);
     accelInstance.setFlags(vk::GeometryInstanceFlagBitsKHR::eTriangleFacingCullDisable);
 
-    Buffer instancesBuffer{context, Buffer::Type::AccelInput, sizeof(vk::AccelerationStructureInstanceKHR), &accelInstance};
+    // Acceleration structure validation
+    if (bottomAccel.buffer.deviceAddress == 0) {
+        throw std::runtime_error("BLAS device address is zero");
+    }
+
+    if (accelInstance.accelerationStructureReference == 0) {
+        throw std::runtime_error("Instance acceleration structure reference is zero");
+    }
+
+    Buffer instancesBuffer{ context, Buffer::Type::AccelInput, sizeof(vk::AccelerationStructureInstanceKHR), &accelInstance };
 
     vk::AccelerationStructureGeometryInstancesDataKHR instancesData;
     instancesData.setArrayOfPointers(false);
@@ -158,34 +186,47 @@ int main() {
 
     vk::AccelerationStructureGeometryKHR instanceGeometry;
     instanceGeometry.setGeometryType(vk::GeometryTypeKHR::eInstances);
-    instanceGeometry.setGeometry({instancesData});
+    instanceGeometry.setGeometry({ instancesData });
     instanceGeometry.setFlags(vk::GeometryFlagBitsKHR::eOpaque);
 
-    Accel topAccel{context, instanceGeometry, 1, vk::AccelerationStructureTypeKHR::eTopLevel};
+    Accel topAccel{ context, instanceGeometry, 1, vk::AccelerationStructureTypeKHR::eTopLevel };
+
+    if (topAccel.buffer.deviceAddress == 0) {
+        throw std::runtime_error("TLAS device address is zero");
+    }
 
     // Load shaders
     const std::vector<char> raygenCode = readFile("../assets/shaders/raygen.rgen.spv");
     const std::vector<char> missCode = readFile("../assets/shaders/miss.rmiss.spv");
     const std::vector<char> chitCode = readFile("../assets/shaders/closesthit.rchit.spv");
 
+    // Shader validation
+    if (raygenCode.empty() || missCode.empty() || chitCode.empty()) {
+        throw std::runtime_error("Failed to load shader code");
+    }
+
+    std::cout << "Raygen shader size: " << raygenCode.size() << " bytes" << std::endl;
+    std::cout << "Miss shader size: " << missCode.size() << " bytes" << std::endl;
+    std::cout << "Closest hit shader size: " << chitCode.size() << " bytes" << std::endl;
+
     std::vector<vk::UniqueShaderModule> shaderModules(3);
-    shaderModules[0] = context.device->createShaderModuleUnique({{}, raygenCode.size(), reinterpret_cast<const uint32_t*>(raygenCode.data())});
-    shaderModules[1] = context.device->createShaderModuleUnique({{}, missCode.size(), reinterpret_cast<const uint32_t*>(missCode.data())});
-    shaderModules[2] = context.device->createShaderModuleUnique({{}, chitCode.size(), reinterpret_cast<const uint32_t*>(chitCode.data())});
+    shaderModules[0] = context.device->createShaderModuleUnique({ {}, raygenCode.size(), reinterpret_cast<const uint32_t*>(raygenCode.data()) });
+    shaderModules[1] = context.device->createShaderModuleUnique({ {}, missCode.size(), reinterpret_cast<const uint32_t*>(missCode.data()) });
+    shaderModules[2] = context.device->createShaderModuleUnique({ {}, chitCode.size(), reinterpret_cast<const uint32_t*>(chitCode.data()) });
 
     std::vector<vk::PipelineShaderStageCreateInfo> shaderStages(3);
-    shaderStages[0] = {{}, vk::ShaderStageFlagBits::eRaygenKHR, *shaderModules[0], "main"};
-    shaderStages[1] = {{}, vk::ShaderStageFlagBits::eMissKHR, *shaderModules[1], "main"};
-    shaderStages[2] = {{}, vk::ShaderStageFlagBits::eClosestHitKHR, *shaderModules[2], "main"};
+    shaderStages[0] = { {}, vk::ShaderStageFlagBits::eRaygenKHR, *shaderModules[0], "main" };
+    shaderStages[1] = { {}, vk::ShaderStageFlagBits::eMissKHR, *shaderModules[1], "main" };
+    shaderStages[2] = { {}, vk::ShaderStageFlagBits::eClosestHitKHR, *shaderModules[2], "main" };
 
     std::vector<vk::RayTracingShaderGroupCreateInfoKHR> shaderGroups(3);
-    shaderGroups[0] = {vk::RayTracingShaderGroupTypeKHR::eGeneral, 0, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR};
-    shaderGroups[1] = {vk::RayTracingShaderGroupTypeKHR::eGeneral, 1, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR};
-    shaderGroups[2] = {vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup, VK_SHADER_UNUSED_KHR, 2, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR};
+    shaderGroups[0] = { vk::RayTracingShaderGroupTypeKHR::eGeneral, 0, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR };
+    shaderGroups[1] = { vk::RayTracingShaderGroupTypeKHR::eGeneral, 1, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR };
+    shaderGroups[2] = { vk::RayTracingShaderGroupTypeKHR::eTrianglesHitGroup, VK_SHADER_UNUSED_KHR, 2, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR };
 
     // Note: Ensure your device supports enough samplers. Sponza has ~50 textures.
     // A size of 0 is invalid, so handle the no-texture case.
-    const uint32_t textureCount = textures.empty() ? 1 : static_cast<uint32_t>(textures.size());
+    const uint32_t textureCount = textures.empty() ? 1u : static_cast<uint32_t>(textures.size());
 
     // create ray tracing pipeline
     std::vector<vk::DescriptorSetLayoutBinding> bindings{
@@ -194,7 +235,7 @@ int main() {
         {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // Vertices
         {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // Indices
         {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // Faces
-		{5, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // Textures
+        {5, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // Textures
     };
 
     // Create desc set layout
@@ -244,16 +285,27 @@ int main() {
     }
 
     // Create SBT
-    Buffer raygenSBT{context, Buffer::Type::ShaderBindingTable, handleSize, handleStorage.data() + 0 * handleSizeAligned};
-    Buffer missSBT{context, Buffer::Type::ShaderBindingTable, handleSize, handleStorage.data() + 1 * handleSizeAligned};
-    Buffer hitSBT{context, Buffer::Type::ShaderBindingTable, handleSize, handleStorage.data() + 2 * handleSizeAligned};
+    Buffer raygenSBT{ context, Buffer::Type::ShaderBindingTable, handleSize, handleStorage.data() + 0 * handleSizeAligned };
+    Buffer missSBT{ context, Buffer::Type::ShaderBindingTable, handleSize, handleStorage.data() + 1 * handleSizeAligned };
+    Buffer hitSBT{ context, Buffer::Type::ShaderBindingTable, handleSize, handleStorage.data() + 2 * handleSizeAligned };
+
+    // SBT validation
+    if (raygenSBT.deviceAddress == 0 || missSBT.deviceAddress == 0 || hitSBT.deviceAddress == 0) {
+        throw std::runtime_error("SBT device address is zero");
+    }
+
+    std::cout << "Shader group handle size: " << handleSize << std::endl;
+    std::cout << "Shader group handle alignment: " << handleSizeAligned << std::endl;
+    std::cout << "Raygen SBT address: " << raygenSBT.deviceAddress << std::endl;
+    std::cout << "Miss SBT address: " << missSBT.deviceAddress << std::endl;
+    std::cout << "Hit SBT address: " << hitSBT.deviceAddress << std::endl;
 
     uint32_t stride = rtProperties.shaderGroupHandleAlignment;
     uint32_t size = rtProperties.shaderGroupHandleAlignment;
 
-    vk::StridedDeviceAddressRegionKHR raygenRegion{raygenSBT.deviceAddress, stride, size};
-    vk::StridedDeviceAddressRegionKHR missRegion{missSBT.deviceAddress, stride, size};
-    vk::StridedDeviceAddressRegionKHR hitRegion{hitSBT.deviceAddress, stride, size};
+    vk::StridedDeviceAddressRegionKHR raygenRegion{ raygenSBT.deviceAddress, stride, size };
+    vk::StridedDeviceAddressRegionKHR missRegion{ missSBT.deviceAddress, stride, size };
+    vk::StridedDeviceAddressRegionKHR hitRegion{ hitSBT.deviceAddress, stride, size };
 
     // Create desc set
     vk::UniqueDescriptorSet descSet = context.allocateDescSet(*descSetLayout);
@@ -275,7 +327,7 @@ int main() {
         dummySampler = context.device->createSamplerUnique(samplerInfo);
 
         // Create a dummy 1x1 black texture
-        Image dummyImage {
+        Image dummyImage{
             context,
             {1, 1},
             vk::Format::eR8G8B8A8Unorm,
@@ -298,41 +350,54 @@ int main() {
     std::vector<vk::WriteDescriptorSet> writes;
     writes.resize(6);
 
+    // 0: TLAS
     writes[0].setDstSet(*descSet);
     writes[0].setDstBinding(0);
     writes[0].setDescriptorCount(1);
     writes[0].setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR);
     writes[0].setPNext(&topAccel.descAccelInfo);
 
+    // 1: storage image
     writes[1].setDstSet(*descSet);
     writes[1].setDstBinding(1);
     writes[1].setDescriptorCount(1);
     writes[1].setDescriptorType(vk::DescriptorType::eStorageImage);
     writes[1].setImageInfo(outputImage.descImageInfo);
 
+    // 2: vertices buffer
     writes[2].setDstSet(*descSet);
     writes[2].setDstBinding(2);
     writes[2].setDescriptorCount(1);
     writes[2].setDescriptorType(vk::DescriptorType::eStorageBuffer);
     writes[2].setBufferInfo(vertexBuffer.descBufferInfo);
 
+    // 3: indices buffer
     writes[3].setDstSet(*descSet);
     writes[3].setDstBinding(3);
     writes[3].setDescriptorCount(1);
     writes[3].setDescriptorType(vk::DescriptorType::eStorageBuffer);
     writes[3].setBufferInfo(indexBuffer.descBufferInfo);
 
+	// 4: faces buffer
     writes[4].setDstSet(*descSet);
     writes[4].setDstBinding(4);
     writes[4].setDescriptorCount(1);
     writes[4].setDescriptorType(vk::DescriptorType::eStorageBuffer);
     writes[4].setBufferInfo(faceBuffer.descBufferInfo);
 
+	// 5: textures array
     writes[5].setDstSet(*descSet);
     writes[5].setDstBinding(5);
     writes[5].setDescriptorCount(textureCount);
     writes[5].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
     writes[5].setImageInfo(imageInfos);
+
+    // Descriptor set validation
+    for (auto& write : writes) {
+        if (write.dstSet == VK_NULL_HANDLE) {
+            throw std::runtime_error("Descriptor set is null");
+        }
+    }
 
     context.device->updateDescriptorSets(writes, nullptr);
 
@@ -342,6 +407,8 @@ int main() {
     uint32_t imageIndex = 0;
     int frame = 0;
     vk::UniqueSemaphore imageAcquiredSemaphore = context.device->createSemaphoreUnique(vk::SemaphoreCreateInfo());
+
+    std::cout << "Starting main loop..." << std::endl;
 
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = glfwGetTime();
@@ -365,7 +432,11 @@ int main() {
         }
 
         // Acquire next image
-        imageIndex = context.device->acquireNextImageKHR(*swapchain, UINT64_MAX, *imageAcquiredSemaphore).value;
+        auto acquireResult = context.device->acquireNextImageKHR(*swapchain, UINT64_MAX, *imageAcquiredSemaphore);
+        if (acquireResult.result != vk::Result::eSuccess) {
+            throw std::runtime_error("Failed to acquire next image");
+        }
+        imageIndex = acquireResult.value;
 
         // Populate and push constants
         PushConstants pc;
@@ -378,6 +449,7 @@ int main() {
         // Record commands
         vk::CommandBuffer commandBuffer = *commandBuffers[imageIndex];
         commandBuffer.begin(vk::CommandBufferBeginInfo());
+        Image::setImageLayout(commandBuffer, *outputImage.image, vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral);
         commandBuffer.bindPipeline(vk::PipelineBindPoint::eRayTracingKHR, *pipeline);
         commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eRayTracingKHR, *pipelineLayout, 0, *descSet, nullptr);
         commandBuffer.pushConstants(*pipelineLayout, vk::ShaderStageFlagBits::eRaygenKHR, 0, sizeof(PushConstants), &pc);

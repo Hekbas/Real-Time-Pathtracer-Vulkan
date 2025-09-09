@@ -126,21 +126,36 @@ void Context::initDevice(GLFWwindow* window) {
         throw std::runtime_error("No suitable queue family found");
     }
 
-    // Create logical device
-    float queuePriority = 1.0f;
-    vk::DeviceQueueCreateInfo queueInfo({}, queueFamilyIndex, 1, &queuePriority);
+    // Enable required features (descriptor indexing / runtimeDescriptorArray + bufferDeviceAddress + ray tracing)
+    vk::PhysicalDeviceFeatures2 deviceFeatures2{};
 
-    // Enable required features
-    vk::PhysicalDeviceFeatures2 deviceFeatures2;
-    vk::PhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures(true);
-    vk::PhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures(true);
-    vk::PhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures(true);
+    // Descriptor indexing features (VK_EXT_descriptor_indexing) - use this instead of VkPhysicalDeviceVulkan12Features in pNext
+    vk::PhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures{};
+    descriptorIndexingFeatures.setRuntimeDescriptorArray(VK_TRUE);
+    descriptorIndexingFeatures.setShaderSampledImageArrayNonUniformIndexing(VK_TRUE);
+    descriptorIndexingFeatures.setDescriptorBindingVariableDescriptorCount(VK_TRUE);
+    descriptorIndexingFeatures.setDescriptorBindingPartiallyBound(VK_TRUE);
 
-    // Chain the feature structures
-    deviceFeatures2.pNext = &bufferDeviceAddressFeatures;
+    // Buffer device address required for raytracing / AS
+    vk::PhysicalDeviceBufferDeviceAddressFeatures bufferDeviceAddressFeatures{};
+    bufferDeviceAddressFeatures.setBufferDeviceAddress(VK_TRUE);
+
+    // Acceleration structure + ray tracing pipeline features
+    vk::PhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures{};
+    accelerationStructureFeatures.setAccelerationStructure(VK_TRUE);
+
+    vk::PhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures{};
+    rayTracingPipelineFeatures.setRayTracingPipeline(VK_TRUE);
+
+    // Chain feature structs: deviceFeatures2 -> descriptorIndexing -> bufferAddress -> AS -> RTPipeline
+    deviceFeatures2.pNext = &descriptorIndexingFeatures;
+    descriptorIndexingFeatures.pNext = &bufferDeviceAddressFeatures;
     bufferDeviceAddressFeatures.pNext = &accelerationStructureFeatures;
     accelerationStructureFeatures.pNext = &rayTracingPipelineFeatures;
 
+    // Create logical device
+    float queuePriority = 1.0f;
+    vk::DeviceQueueCreateInfo queueInfo({}, queueFamilyIndex, 1, &queuePriority);
     vk::DeviceCreateInfo deviceInfo({}, queueInfo);
     deviceInfo.setPEnabledExtensionNames(deviceExtensions);
     deviceInfo.pNext = &deviceFeatures2;
@@ -155,22 +170,25 @@ void Context::initDevice(GLFWwindow* window) {
     // Get queue
     queue = device->getQueue(queueFamilyIndex, 0);
 
-    // Create command pool
-    vk::CommandPoolCreateInfo cmdPoolInfo({}, queueFamilyIndex);
+    // Create command pool (allow resetting command buffers)
+    vk::CommandPoolCreateInfo cmdPoolInfo;
+    cmdPoolInfo.setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer);
+    cmdPoolInfo.setQueueFamilyIndex(queueFamilyIndex);
     commandPool = device->createCommandPoolUnique(cmdPoolInfo);
 
-    // Create descriptor pool
+    // Create descriptor pool: bump combined sampler count to support many textures (e.g. Sponza ~70)
     std::vector<vk::DescriptorPoolSize> poolSizes = {
         {vk::DescriptorType::eAccelerationStructureKHR, 10},
         {vk::DescriptorType::eStorageImage, 10},
         {vk::DescriptorType::eUniformBuffer, 10},
-        {vk::DescriptorType::eStorageBuffer, 10},
-        {vk::DescriptorType::eCombinedImageSampler, 10}
+        {vk::DescriptorType::eStorageBuffer, 50},
+        // allow many combined image samplers (make this large enough for your scenes)
+        {vk::DescriptorType::eCombinedImageSampler, 1024}
     };
 
     vk::DescriptorPoolCreateInfo descPoolInfo(
         vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
-        100, // max sets
+        2000, // max sets (raise to be safe)
         poolSizes
     );
 

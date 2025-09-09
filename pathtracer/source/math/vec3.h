@@ -5,6 +5,7 @@ struct Vec3 {
     float x, y, z;
 
     Vec3() : x(0), y(0), z(0) {}
+    Vec3(float x) : x(x), y(x), z(x) {}
     Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
 
     Vec3 operator+() const { return *this; }
@@ -34,8 +35,12 @@ struct Vec3 {
             z * other.x - x * other.z,
             x * other.y - y * other.x);
     }
-    
-    Vec3 normalized() const { return *this / length(); }
+
+    Vec3 normalized() const {
+        float len = length();
+        if (len > 0.0f) return *this / len;
+        return Vec3(0.0f, 0.0f, 0.0f);
+    }
 };
 
 inline float dot(const Vec3& a, const Vec3& b) {
@@ -50,8 +55,7 @@ inline Vec3 cross(const Vec3& a, const Vec3& b) {
 
 inline Vec3 normalize(const Vec3& v) {
     float len = v.length();
-    if (len > 0.0f)
-        return v / len;
+    if (len > 0.0f) return v / len;
     return { 0.0f, 0.0f, 0.0f };
 }
 

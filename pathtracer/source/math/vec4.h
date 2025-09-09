@@ -41,7 +41,6 @@ inline float dot(const Vec4& a, const Vec4& b) {
 
 inline Vec4 normalize(const Vec4& v) {
     float len = v.length();
-    if (len > 0.0f)
-        return v / len;
+    if (len > 0.0f) return v / len;
     return { 0.0f, 0.0f, 0.0f, 0.0f };
 }

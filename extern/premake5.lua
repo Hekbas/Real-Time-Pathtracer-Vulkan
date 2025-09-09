@@ -81,18 +81,4 @@ project "glfw"
         defines { "_GLFW_COCOA" }
     
     filter {}
-
--- tinyobjloader
-project "tinyobjloader"
-    kind "StaticLib"
-    language "C++"
-    cppdialect "C++11"
     
-    files {
-        "source/tinyobjloader/tiny_obj_loader.h",
-        "source/tinyobjloader/tiny_obj_loader.cc"
-    }
-    
-    includedirs {
-        "source/tinyobjloader"
-    }

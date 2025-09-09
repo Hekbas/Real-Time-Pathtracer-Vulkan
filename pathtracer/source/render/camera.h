@@ -11,7 +11,7 @@ struct Camera {
 
     float yaw = 0.0f;
     float pitch = 0.0f;
-    float speed = 150.0f;
+    float speed = 1.0;
     float sensitivity = 0.1f;
 
     void updateCameraVectors();
