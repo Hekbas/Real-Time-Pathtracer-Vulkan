@@ -18,72 +18,41 @@ namespace fs = std::filesystem;
 
 // Helper function to get transformation matrix from a GLTF node
 Mat4 getNodeMatrix(const tinygltf::Node& node) {
-    Mat4 matrix = Mat4::identity();
-
+    // If a full 4x4 matrix is present, use fromGLTF which already handles column->row conversion
     if (!node.matrix.empty()) {
-        // Node has a direct matrix transformation
-        for (int i = 0; i < 4; i++) {
-            for (int j = 0; j < 4; j++) {
-                matrix.m[i][j] = static_cast<float>(node.matrix[i * 4 + j]);
-            }
-        }
-    }
-    else {
-        // Node has separate TRS components
-        Vec3 translation(0.0f);
-        Vec3 scale(1.0f);
-
-        if (!node.translation.empty()) {
-            translation = Vec3(
-                static_cast<float>(node.translation[0]),
-                static_cast<float>(node.translation[1]),
-                static_cast<float>(node.translation[2])
-            );
-        }
-
-        if (!node.scale.empty()) {
-            scale = Vec3(
-                static_cast<float>(node.scale[0]),
-                static_cast<float>(node.scale[1]),
-                static_cast<float>(node.scale[2])
-            );
-        }
-
-        // Create transformation matrix from TRS
-        Mat4 translationMat = Mat4::translate(translation);
-        Mat4 scaleMat = Mat4::scale(scale);
-
-        // Handle rotation (quaternion)
-        if (!node.rotation.empty()) {
-            float x = static_cast<float>(node.rotation[0]);
-            float y = static_cast<float>(node.rotation[1]);
-            float z = static_cast<float>(node.rotation[2]);
-            float w = static_cast<float>(node.rotation[3]);
-
-            // Convert quaternion to rotation matrix
-            Mat4 rotationMat;
-            rotationMat.m[0][0] = 1 - 2 * y * y - 2 * z * z;
-            rotationMat.m[0][1] = 2 * x * y + 2 * w * z;
-            rotationMat.m[0][2] = 2 * x * z - 2 * w * y;
-
-            rotationMat.m[1][0] = 2 * x * y - 2 * w * z;
-            rotationMat.m[1][1] = 1 - 2 * x * x - 2 * z * z;
-            rotationMat.m[1][2] = 2 * y * z + 2 * w * x;
-
-            rotationMat.m[2][0] = 2 * x * z + 2 * w * y;
-            rotationMat.m[2][1] = 2 * y * z - 2 * w * x;
-            rotationMat.m[2][2] = 1 - 2 * x * x - 2 * y * y;
-
-            rotationMat.m[3][3] = 1.0f;
-
-            matrix = translationMat * rotationMat * scaleMat;
-        }
-        else {
-            matrix = translationMat * scaleMat;
-        }
+        return Mat4::fromGLTF(node.matrix.data());
     }
 
-    return matrix;
+    Mat4 translation = Mat4::identity();
+    Mat4 rotation = Mat4::identity();
+    Mat4 scale = Mat4::identity();
+
+    if (!node.translation.empty()) {
+        translation = Mat4::translate(Vec3(
+            static_cast<float>(node.translation[0]),
+            static_cast<float>(node.translation[1]),
+            static_cast<float>(node.translation[2])
+        ));
+    }
+
+    if (!node.rotation.empty()) {
+        rotation = Mat4::fromQuaternion(
+            static_cast<float>(node.rotation[0]),
+            static_cast<float>(node.rotation[1]),
+            static_cast<float>(node.rotation[2]),
+            static_cast<float>(node.rotation[3])
+        );
+    }
+
+    if (!node.scale.empty()) {
+        scale = Mat4::scale(Vec3(
+            static_cast<float>(node.scale[0]),
+            static_cast<float>(node.scale[1]),
+            static_cast<float>(node.scale[2])
+        ));
+    }
+
+    return  translation * rotation * scale;
 }
 
 // Recursive function to process nodes
@@ -105,13 +74,9 @@ void processNode(
     Mat4 nodeMatrix = getNodeMatrix(node);
     Mat4 worldMatrix = parentMatrix * nodeMatrix;
 
-    Mat3 worldMatrix3x3;
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            worldMatrix3x3.m[i][j] = worldMatrix.m[i][j];
-    Mat3 inverseTranspose = worldMatrix3x3.inverse();
+    Mat3 inverseTranspose = worldMatrix.toMat3().inverse(); // for normals
 
-    // Mesh
+    // Process mesh if present
     if (node.mesh >= 0) {
         const auto& mesh = model.meshes[node.mesh];
 
@@ -119,237 +84,170 @@ void processNode(
             if (primitive.mode != TINYGLTF_MODE_TRIANGLES) continue;
 
             // --- Indices ---
-            const auto& indexAccessor = model.accessors[primitive.indices];
-            const auto& indexBufferView = model.bufferViews[indexAccessor.bufferView];
-            const auto& indexBuffer = model.buffers[indexBufferView.buffer];
-            const uint8_t* indexData = indexBuffer.data.data() + indexBufferView.byteOffset + indexAccessor.byteOffset;
-            uint32_t indexCount = indexAccessor.count;
-
             std::vector<uint32_t> primitiveIndices;
-            primitiveIndices.reserve(indexCount);
-            if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
-                const uint16_t* src = reinterpret_cast<const uint16_t*>(indexData);
-                primitiveIndices.assign(src, src + indexCount);
-            }
-            else if (indexAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
-                const uint32_t* src = reinterpret_cast<const uint32_t*>(indexData);
-                primitiveIndices.assign(src, src + indexCount);
+            if (primitive.indices >= 0) {
+                const auto& accessor = model.accessors[primitive.indices];
+                const auto& bufferView = model.bufferViews[accessor.bufferView];
+                const auto& buffer = model.buffers[bufferView.buffer];
+                const uint8_t* dataStart = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+
+                primitiveIndices.resize(accessor.count);
+                for (size_t i = 0; i < accessor.count; i++) {
+                    if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+                        primitiveIndices[i] = reinterpret_cast<const uint16_t*>(dataStart)[i];
+                    }
+                    else if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+                        primitiveIndices[i] = reinterpret_cast<const uint32_t*>(dataStart)[i];
+                    }
+                }
             }
 
             // --- Attributes ---
-            const float* positionPtr = nullptr;
-            const float* normalPtr = nullptr;
-            const float* texCoordPtr = nullptr;
-            const float* tangentPtr = nullptr;
-            size_t vertexCount = 0;
+            auto readAttribute = [&](const std::string& name, std::vector<Vec3>& out) {
+                if (!primitive.attributes.count(name)) return;
+                const auto& accessor = model.accessors.at(primitive.attributes.at(name));
+                const auto& bufferView = model.bufferViews[accessor.bufferView];
+                const auto& buffer = model.buffers[bufferView.buffer];
+                const uint8_t* dataStart = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+                size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 3;
+                out.resize(accessor.count);
+                for (size_t i = 0; i < accessor.count; i++) {
+                    const float* src = reinterpret_cast<const float*>(dataStart + i * stride);
+                    out[i] = Vec3(src[0], src[1], src[2]);
+                }
+            };
 
-            if (primitive.attributes.count("POSITION")) {
-                const auto& accessor = model.accessors.at(primitive.attributes.at("POSITION"));
-                const auto& bufferView = model.bufferViews[accessor.bufferView];
-                const auto& buffer = model.buffers[bufferView.buffer];
-                positionPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
-                vertexCount = accessor.count;
-            }
-            if (primitive.attributes.count("NORMAL")) {
-                const auto& accessor = model.accessors.at(primitive.attributes.at("NORMAL"));
-                const auto& bufferView = model.bufferViews[accessor.bufferView];
-                const auto& buffer = model.buffers[bufferView.buffer];
-                normalPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
-            }
+            std::vector<Vec3> positions, normals, tangents;
+            readAttribute("POSITION", positions);
+            readAttribute("NORMAL", normals);
+            readAttribute("TANGENT", tangents);
+
+            // --- Texcoords (Vec2) ---
+            std::vector<Vec2> texcoords;
             if (primitive.attributes.count("TEXCOORD_0")) {
                 const auto& accessor = model.accessors.at(primitive.attributes.at("TEXCOORD_0"));
                 const auto& bufferView = model.bufferViews[accessor.bufferView];
                 const auto& buffer = model.buffers[bufferView.buffer];
-                texCoordPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
-            }
-            if (primitive.attributes.count("TANGENT")) {
-                const auto& accessor = model.accessors.at(primitive.attributes.at("TANGENT"));
-                const auto& bufferView = model.bufferViews[accessor.bufferView];
-                const auto& buffer = model.buffers[bufferView.buffer];
-                tangentPtr = reinterpret_cast<const float*>(buffer.data.data() + bufferView.byteOffset + accessor.byteOffset);
-            }
-
-            // --- Tangent computation if missing ---
-            std::vector<Vec3> tempTangents;
-            if (!tangentPtr && vertexCount > 0) {
-                tempTangents.assign(vertexCount, Vec3{ 0,0,0 });
-                for (size_t t = 0; t + 2 < primitiveIndices.size(); t += 3) {
-                    uint32_t ia = primitiveIndices[t + 0];
-                    uint32_t ib = primitiveIndices[t + 1];
-                    uint32_t ic = primitiveIndices[t + 2];
-                    Vec3 p0(positionPtr[3 * ia + 0], positionPtr[3 * ia + 1], positionPtr[3 * ia + 2]);
-                    Vec3 p1(positionPtr[3 * ib + 0], positionPtr[3 * ib + 1], positionPtr[3 * ib + 2]);
-                    Vec3 p2(positionPtr[3 * ic + 0], positionPtr[3 * ic + 1], positionPtr[3 * ic + 2]);
-                    Vec2 uv0(texCoordPtr ? texCoordPtr[2 * ia + 0] : 0, texCoordPtr ? texCoordPtr[2 * ia + 1] : 0);
-                    Vec2 uv1(texCoordPtr ? texCoordPtr[2 * ib + 0] : 0, texCoordPtr ? texCoordPtr[2 * ib + 1] : 0);
-                    Vec2 uv2(texCoordPtr ? texCoordPtr[2 * ic + 0] : 0, texCoordPtr ? texCoordPtr[2 * ic + 1] : 0);
-                    Vec3 e1 = p1 - p0;
-                    Vec3 e2 = p2 - p0;
-                    Vec2 duv1 = uv1 - uv0;
-                    Vec2 duv2 = uv2 - uv0;
-                    float r = duv1.x * duv2.y - duv1.y * duv2.x;
-                    if (fabs(r) < 1e-8f) continue;
-                    float invR = 1.0f / r;
-                    Vec3 tangent = (e1 * duv2.y - e2 * duv1.y) * invR;
-                    tempTangents[ia] += tangent;
-                    tempTangents[ib] += tangent;
-                    tempTangents[ic] += tangent;
+                const uint8_t* dataStart = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+                size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 2;
+                texcoords.resize(accessor.count);
+                for (size_t i = 0; i < accessor.count; i++) {
+                    const float* src = reinterpret_cast<const float*>(dataStart + i * stride);
+                    texcoords[i] = Vec2(src[0], src[1]);
                 }
             }
 
-            // --- Push vertices ---
-            for (size_t i = 0; i < vertexCount; ++i) {
+            // --- Create vertices ---
+            for (size_t i = 0; i < positions.size(); ++i) {
                 Vertex v{};
-                // pos
-                Vec3 pos(positionPtr[3 * i + 0], positionPtr[3 * i + 1], positionPtr[3 * i + 2]);
-                Vec3 worldPos = worldMatrix.transformPoint(pos);
-                v.position.x = worldPos.x; v.position.y = worldPos.y; v.position.z = worldPos.z;
-                // normal
-                if (normalPtr) {
-                    Vec3 n(normalPtr[3 * i + 0], normalPtr[3 * i + 1], normalPtr[3 * i + 2]);
-                    n = inverseTranspose * n;
-                    v.normal.x = n.x; v.normal.y = n.y; v.normal.z = n.z;
-                }
-                // texcoord
-                if (texCoordPtr) {
-                    v.texCoord[0] = texCoordPtr[2 * i + 0];
-                    v.texCoord[1] = texCoordPtr[2 * i + 1];
-                }
-                // tangent
-                if (tangentPtr) {
-                    v.tangent.x = tangentPtr[4 * i + 0];
-                    v.tangent.y = tangentPtr[4 * i + 1];
-                    v.tangent.z = tangentPtr[4 * i + 2];
-                }
-                else if (!tempTangents.empty()) {
-                    Vec3 T = tempTangents[i];
-                    Vec3 N(v.normal.x, v.normal.y, v.normal.z);
-                    if (T.length() > 1e-6f) T = normalize(T - N * dot(N, T));
-                    else {
-                        Vec3 up = fabs(N.y) < 0.999f ? Vec3{ 0,1,0 } : Vec3{ 1,0,0 };
-                        T = normalize(cross(up, N));
-                    }
-                    v.tangent.x = T.x; v.tangent.y = T.y; v.tangent.z = T.z;
-                }
-                else {
-                    v.tangent.x = 1; v.tangent.y = 0; v.tangent.z = 0;
-                }
+                Vec3 p = positions[i];
+                Vec3 n = normals.empty() ? Vec3{ 0,1,0 } : normals[i];
+                Vec3 t = tangents.empty() ? Vec3{ 1,0,0 } : tangents[i];
+                Vec2 uv = texcoords.empty() ? Vec2{ 0,0 } : texcoords[i];
+
+                // Apply world transform
+                Vec3 worldPos = worldMatrix.transformPoint(p);
+                Vec3 worldNormal = inverseTranspose * n;
+                Vec3 worldTangent = worldMatrix.toMat3() * t;
+
+                v.position = worldPos;
+                v.normal = worldNormal;
+                v.tangent = worldTangent;
+                v.texCoord[0] = uv.x;
+                v.texCoord[1] = uv.y;
+
                 vertices.push_back(v);
             }
 
-            // --- Indices (global offset) ---
+            // --- Indices with vertexOffset ---
             for (uint32_t idx : primitiveIndices)
                 indices.push_back(vertexOffset + idx);
 
-            // --- Material Processing ---
+            // --- Material processing ---
             Material baseMaterial{};
-            // Set default material properties
             baseMaterial.albedo = { 0.8f, 0.8f, 0.8f };
             baseMaterial.emission = { 0.0f, 0.0f, 0.0f };
             baseMaterial.diffuseTextureID = -1;
-            baseMaterial.material_type = 0; // MAT_LAMBERTIAN
-            baseMaterial.roughness = 1.0f;
-            baseMaterial.ior = 1.5f;
-            baseMaterial.metallic = 0.0f;
-            baseMaterial.alpha = 1.0f;
             baseMaterial.metalRoughTextureID = -1;
             baseMaterial.normalTextureID = -1;
+            baseMaterial.roughness = 1.0f;
+            baseMaterial.metallic = 0.0f;
+            baseMaterial.ior = 1.5f;
+            baseMaterial.alpha = 1.0f;
+            baseMaterial.material_type = 0; // MAT_LAMBERTIAN
 
             uint32_t materialIndex = 0;
-
-            // Check if we've already processed this glTF material
-            if (gltfMaterialMap.count(primitive.material)) {
-                materialIndex = gltfMaterialMap[primitive.material];
-            }
-            else {
-                // It's a new material, so process and store it
-                if (primitive.material >= 0) {
-                    const auto& material = model.materials[primitive.material];
-                    const auto& pbr = material.pbrMetallicRoughness;
-
-                    if (pbr.baseColorFactor.size() >= 3) {
-                        baseMaterial.albedo.x = (float)pbr.baseColorFactor[0];
-                        baseMaterial.albedo.y = (float)pbr.baseColorFactor[1];
-                        baseMaterial.albedo.z = (float)pbr.baseColorFactor[2];
-                    }
-                    if (pbr.baseColorFactor.size() == 4)
-                        baseMaterial.alpha = (float)pbr.baseColorFactor[3];
-
-                    if (material.emissiveFactor.size() == 3) {
-                        baseMaterial.emission.x = (float)material.emissiveFactor[0];
-                        baseMaterial.emission.y = (float)material.emissiveFactor[1];
-                        baseMaterial.emission.z = (float)material.emissiveFactor[2];
-                    }
-
-                    // baseColorTexture
-                    if (pbr.baseColorTexture.index >= 0) {
-                        const auto& tex = model.textures[pbr.baseColorTexture.index];
-                        const auto& img = model.images[tex.source];
-                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
-                        if (!textureIndexMap.count(path)) {
-                            textureIndexMap[path] = (int)textureFiles.size();
-                            textureFiles.push_back(path);
-                        }
-                        baseMaterial.diffuseTextureID = textureIndexMap[path];
-                    }
-
-                    baseMaterial.roughness = (float)pbr.roughnessFactor;
-                    baseMaterial.metallic = (float)pbr.metallicFactor;
-
-                    // metallicRoughnessTexture
-                    if (pbr.metallicRoughnessTexture.index >= 0) {
-                        const auto& tex = model.textures[pbr.metallicRoughnessTexture.index];
-                        const auto& img = model.images[tex.source];
-                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
-                        if (!textureIndexMap.count(path)) {
-                            textureIndexMap[path] = (int)textureFiles.size();
-                            textureFiles.push_back(path);
-                        }
-                        baseMaterial.metalRoughTextureID = textureIndexMap[path];
-                    }
-
-                    // normalTexture
-                    if (material.normalTexture.index >= 0) {
-                        const auto& tex = model.textures[material.normalTexture.index];
-                        const auto& img = model.images[tex.source];
-                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
-                        if (!textureIndexMap.count(path)) {
-                            textureIndexMap[path] = (int)textureFiles.size();
-                            textureFiles.push_back(path);
-                        }
-                        baseMaterial.normalTextureID = textureIndexMap[path];
-                    }
-
-                    // IOR (extension)
-                    if (material.extensions.count("KHR_materials_ior")) {
-                        const auto& ext = material.extensions.at("KHR_materials_ior");
-                        if (ext.Has("ior"))
-                            baseMaterial.ior = (float)ext.Get("ior").Get<double>();
-                    }
+            if (primitive.material >= 0) {
+                if (gltfMaterialMap.count(primitive.material)) {
+                    materialIndex = gltfMaterialMap[primitive.material];
                 }
+                else {
+                    const auto& mat = model.materials[primitive.material];
+                    const auto& pbr = mat.pbrMetallicRoughness;
 
-                // Add the new material to our list and map its index
-                materialIndex = static_cast<uint32_t>(materials.size());
-                materials.push_back(baseMaterial);
-                gltfMaterialMap[primitive.material] = materialIndex;
+                    if (pbr.baseColorFactor.size() >= 3)
+                        baseMaterial.albedo = { (float)pbr.baseColorFactor[0], (float)pbr.baseColorFactor[1], (float)pbr.baseColorFactor[2] };
+                    if (pbr.baseColorFactor.size() == 4) baseMaterial.alpha = (float)pbr.baseColorFactor[3];
+
+                    if (mat.emissiveFactor.size() == 3)
+                        baseMaterial.emission = { (float)mat.emissiveFactor[0], (float)mat.emissiveFactor[1], (float)mat.emissiveFactor[2] };
+
+                    // Textures
+                    auto processTexture = [&](const tinygltf::TextureInfo& texInfo, int& texID) {
+                        if (texInfo.index < 0) return;
+                        const auto& tex = model.textures[texInfo.index];
+                        const auto& img = model.images[tex.source];
+                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                        if (!textureIndexMap.count(path)) {
+                            textureIndexMap[path] = (int)textureFiles.size();
+                            textureFiles.push_back(path);
+                        }
+                        texID = textureIndexMap[path];
+                    };
+
+                    // overload for NormalTextureInfo
+                    auto processNormalTexture = [&](const tinygltf::NormalTextureInfo& texInfo, int& texID) {
+                        if (texInfo.index < 0) return;
+                        const auto& tex = model.textures[texInfo.index];
+                        const auto& img = model.images[tex.source];
+                        std::string path = (std::filesystem::path(modelDir) / img.uri).string();
+                        if (!textureIndexMap.count(path)) {
+                            textureIndexMap[path] = (int)textureFiles.size();
+                            textureFiles.push_back(path);
+                        }
+                        texID = textureIndexMap[path];
+                        };
+
+                    processTexture(pbr.baseColorTexture, baseMaterial.diffuseTextureID);
+                    processTexture(pbr.metallicRoughnessTexture, baseMaterial.metalRoughTextureID);
+                    processNormalTexture(mat.normalTexture, baseMaterial.normalTextureID);
+
+                    if (mat.extensions.count("KHR_materials_ior")) {
+                        const auto& ext = mat.extensions.at("KHR_materials_ior");
+                        if (ext.Has("ior")) baseMaterial.ior = (float)ext.Get("ior").Get<double>();
+                    }
+
+                    materialIndex = (uint32_t)materials.size();
+                    materials.push_back(baseMaterial);
+                    gltfMaterialMap[primitive.material] = materialIndex;
+                }
             }
 
-            // --- Face Material Indices ---
+            // --- Face material indices ---
             size_t triCount = primitiveIndices.size() / 3;
-            for (size_t t = 0; t < triCount; t++) {
-                // For each triangle, push the index of its material
-                faceMaterialIndices.push_back(materialIndex);
-            }
+            for (size_t t = 0; t < triCount; t++) faceMaterialIndices.push_back(materialIndex);
 
-            vertexOffset += (uint32_t)vertexCount;
+            vertexOffset += (uint32_t)positions.size();
         }
     }
 
+    // Recurse children
     for (int child : node.children)
         processNode(model, model.nodes[child], worldMatrix,
             vertices, indices, materials, faceMaterialIndices, gltfMaterialMap,
             textureIndexMap, textureFiles, modelDir, vertexOffset);
 }
+
 
 
 void loadFromFile(

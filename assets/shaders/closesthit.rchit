@@ -4,11 +4,11 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 #include "common.glsl"
 
-layout(binding = 2, set = 0) buffer Vertices { float vertices[]; };
-layout(binding = 3, set = 0) buffer Indices  { uint indices[]; };
-layout(binding = 4, set = 0) buffer Materials { float materials[]; };
-layout(binding = 5, set = 0) buffer FaceMaterialIndices { uint materialIndices[]; };
-layout(binding = 6, set = 0) uniform sampler2D textures[];
+layout(binding = 3, set = 0) buffer Vertices { float vertices[]; };
+layout(binding = 4, set = 0) buffer Indices  { uint indices[]; };
+layout(binding = 5, set = 0) buffer Materials { float materials[]; };
+layout(binding = 6, set = 0) buffer FaceMaterialIndices { uint materialIndices[]; };
+layout(binding = 7, set = 0) uniform sampler2D textures[];
 
 layout(location = 0) rayPayloadInEXT HitPayload payload;
 hitAttributeEXT vec2 attribs;
@@ -103,7 +103,6 @@ void main() {
     // --- Normal map (stay linear, no gamma) ---
     vec3 finalNormal = normal;
     if (material.normalTextureID != -1) {
-        // ... (Normal mapping logic unchanged, just use material.normalTextureID) ...
         vec3 nmap = texture(nonuniformEXT(textures[nonuniformEXT(material.normalTextureID)]), texCoord).rgb;
         nmap = nmap * 2.0 - 1.0;
         vec3 T = normalize(tangent - normal * dot(normal, tangent));
@@ -114,7 +113,7 @@ void main() {
 
     // --- Write payload ---
     payload.albedo        = albedoColor;
-    payload.emission      = material.emission; // Use material.
+    payload.emission      = material.emission;
     payload.position      = position;
     payload.normal        = finalNormal;
     payload.roughness     = clamp(roughness, 0.01, 1.0);

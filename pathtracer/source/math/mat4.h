@@ -61,6 +61,42 @@ struct Mat4 {
         return mat;
     }
 
+    static Mat4 fromQuaternion(float x, float y, float z, float w) {
+        Mat4 mat;
+
+        float xx = x * x;
+        float yy = y * y;
+        float zz = z * z;
+        float xy = x * y;
+        float xz = x * z;
+        float xw = x * w;
+        float yz = y * z;
+        float yw = y * w;
+        float zw = z * w;
+
+        mat.m[0][0] = 1.0f - 2.0f * (yy + zz);
+        mat.m[0][1] = 2.0f * (xy + zw);
+        mat.m[0][2] = 2.0f * (xz - yw);
+        mat.m[0][3] = 0.0f;
+
+        mat.m[1][0] = 2.0f * (xy - zw);
+        mat.m[1][1] = 1.0f - 2.0f * (xx + zz);
+        mat.m[1][2] = 2.0f * (yz + xw);
+        mat.m[1][3] = 0.0f;
+
+        mat.m[2][0] = 2.0f * (xz + yw);
+        mat.m[2][1] = 2.0f * (yz - xw);
+        mat.m[2][2] = 1.0f - 2.0f * (xx + yy);
+        mat.m[2][3] = 0.0f;
+
+        mat.m[3][0] = 0.0f;
+        mat.m[3][1] = 0.0f;
+        mat.m[3][2] = 0.0f;
+        mat.m[3][3] = 1.0f;
+
+        return mat;
+    }
+
     static Mat4 perspective(float fovRad, float aspect, float near, float far) {
         Mat4 mat;
         float f = 1.0f / std::tan(fovRad * 0.5f);
@@ -96,6 +132,17 @@ struct Mat4 {
         mat.m[3][1] = -dot(u, eye);
         mat.m[3][2] = dot(f, eye);
         return mat;
+    }
+
+    static Mat4 fromGLTF(const double* matrix) {
+        Mat4 result;
+        for (int row = 0; row < 4; row++) {
+            for (int col = 0; col < 4; col++) {
+                // transpose
+                result.m[col][row] = static_cast<float>(matrix[row + col * 4]);
+            }
+        }
+        return result;
     }
 
     Mat4 operator*(const Mat4& other) const {
@@ -134,12 +181,12 @@ struct Mat4 {
         return Vec3(result.x, result.y, result.z);
     }
 
-    // Helper function to extract the 3x3 part of a matrix for normal transformation
-    Mat3 extract3x3(const Mat4& mat) {
+    // Extract the 3x3 part of the matrix
+    Mat3 toMat3() const {
         Mat3 result;
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < 3; j++) {
-                result.m[i][j] = mat.m[i][j];
+                result.m[i][j] = m[i][j];
             }
         }
         return result;

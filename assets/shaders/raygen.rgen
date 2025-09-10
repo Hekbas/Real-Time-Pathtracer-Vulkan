@@ -1,6 +1,10 @@
 #version 460
 #extension GL_EXT_ray_tracing : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : enable
+precision highp float;
+
 #include "common.glsl"
 
 layout(binding = 0, set = 0) uniform accelerationStructureEXT topLevelAS;
@@ -16,6 +20,77 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout(location = 0) rayPayloadEXT HitPayload payload;
+
+layout(binding = 8, set = 0) readonly buffer EmissiveTriSSBO {
+    vec4 triData[]; // layout: each tri uses 6 vec4s: v0,v1,v2,normal,emission,areaVec
+};
+
+layout(binding = 9, set = 0) readonly buffer EmissiveCdfSSBO {
+    float cdf[]; // normalized cumulative distribution in [0,1]
+};
+
+layout(binding = 10, set = 0) uniform LightCountUBO {
+    int lightCount;
+};
+
+// --- Emissive tri helper type (GLSL-side) ---
+struct EmissiveTri {
+    vec3 v0;
+    vec3 v1;
+    vec3 v2;
+    vec3 normal;
+    vec3 emission; // linear radiance
+    float area;
+};
+
+EmissiveTri readEmissiveTri(int idx) {
+    int base = idx * 6;
+    EmissiveTri e;
+    e.v0 = triData[base + 0].xyz;
+    e.v1 = triData[base + 1].xyz;
+    e.v2 = triData[base + 2].xyz;
+    e.normal = triData[base + 3].xyz;
+    e.emission = triData[base + 4].xyz;
+    e.area = triData[base + 5].x;
+    return e;
+}
+
+// --- CDF sampling (binary search) ---
+int sampleTriFromCDF(float r) {
+    if (lightCount <= 0) return -1;
+    int lo = 0;
+    int hi = lightCount - 1;
+    // handle r <= first entry quickly
+    if (r <= cdf[0]) return 0;
+    while (lo < hi) {
+        int mid = (lo + hi) >> 1;
+        if (cdf[mid] < r) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+// --- sample a uniform point on triangle (returns point, outputs area-pdf and tri normal) ---
+vec3 samplePointOnTri(in EmissiveTri e, inout uint seed, out float pdfA, out vec3 outNormal) {
+    float r1 = rand(seed);
+    float r2 = rand(seed);
+    float sr1 = sqrt(r1);
+    float b0 = 1.0 - sr1;
+    float b1 = r2 * sr1;
+    vec3 p = e.v0 * b0 + e.v1 * b1 + e.v2 * (1.0 - b0 - b1);
+    pdfA = 1.0 / max(e.area, EPS);
+    outNormal = e.normal;
+    return p;
+}
+
+// convert area-pdf -> solid-angle pdf at shading point x
+float areaPdfToSolidAnglePdf(float pA, vec3 lightN, vec3 x, vec3 p) {
+    vec3 L = p - x;
+    float dist2 = max(dot(L,L), EPS);
+    vec3 dir = normalize(L);
+    float Nl_dot = max(dot(lightN, -dir), EPS);
+    return pA * (dist2 / Nl_dot);
+}
 
 void main()
 {
@@ -54,7 +129,7 @@ void main()
             traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0,
                         origin, 0.001, direction, 1e20, 0);
 
-            radiance += throughput * payload.emission;
+            radiance += throughput * payload.emission * 10.0;
             if (payload.done) break;
 
             // shading basis
@@ -70,7 +145,7 @@ void main()
                 continue;
             }
 
-            // Dielectric (refraction)
+            // Dielectric (refraction) handling
             if (payload.material_type == MAT_DIELECTRIC) {
                 vec3 I = normalize(direction);
                 vec3 Nl = N;
@@ -90,6 +165,102 @@ void main()
                 continue;
             }
 
+            // ----------------------- NEXT-EVENT ESTIMATION (NEE) -----------------------
+            // sample one emissive triangle & point, trace shadow (occlusion), compute MIS weight (power heuristic)
+            if (lightCount > 0) {
+                // sample triangle index from CDF
+                float u = rand(seed);
+                int triIdx = sampleTriFromCDF(u);
+                if (triIdx >= 0 && triIdx < lightCount) {
+                    EmissiveTri ET = readEmissiveTri(triIdx);
+
+                    // compute p_tri from CDF (probability of selecting this triangle)
+                    float p_tri = (triIdx == 0) ? cdf[0] : (cdf[triIdx] - cdf[triIdx - 1]);
+                    // sample a point on the triangle surface (uniform area)
+                    float dummyPdfA;
+                    vec3 lightNormal;
+                    vec3 pOnLight = samplePointOnTri(ET, seed, dummyPdfA, lightNormal);
+
+                    // combine to pdf per area = p_tri / area
+                    float pA = p_tri / max(ET.area, EPS);
+
+                    // geometry and direction
+                    vec3 surfPos = payload.position;
+                    vec3 toLight = pOnLight - surfPos;
+                    float dist2 = max(dot(toLight, toLight), EPS);
+                    vec3 L = normalize(toLight);
+                    float NdotL = max(dot(N, L), 0.0);
+                    float Nl_dot = max(dot(lightNormal, -L), 0.0);
+
+                    if (NdotL > 0.0 && Nl_dot > 0.0) {
+                        // ---------------- rayQueryEXT visibility check ----------------
+                        bool visible = true;
+                        {
+                            const float eps = 1e-4;
+                            vec3 rayOrigin = surfPos + N * eps;
+                            float fullDist = sqrt(dist2);
+                            float tmax = max(0.0, fullDist - eps);
+                            vec3 targetNudge = pOnLight - lightNormal * eps;
+                            vec3 rayDir = normalize(targetNudge - rayOrigin);
+
+                            rayQueryEXT rq;
+                            rayQueryInitializeEXT(rq, topLevelAS, gl_RayFlagsNoneEXT, 0xFF,
+                                                rayOrigin, 0.0, rayDir, tmax);
+
+                            while (rayQueryProceedEXT(rq)) {
+                                if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT)
+                                    continue;
+
+                                // Backface check (simpler than normals): skip if we hit a back-facing triangle
+                                bool frontFacing = rayQueryGetIntersectionFrontFaceEXT(rq, true);
+                                if (!frontFacing) {
+                                    continue; // ignore backfaces
+                                }
+
+                                // TODO: alpha test
+                                // - Get primitive ID: rayQueryGetIntersectionPrimitiveIndexEXT.
+                                // - Get barycentrics: rayQueryGetIntersectionBarycentricsEXT.
+                                // - Fetch triangle vertex indices from your indices[] SSBO.
+                                // - Fetch vertex texcoords from your vertices[] SSBO.
+                                // - Interpolate UV with barycentrics.
+                                // - Sample texture, check alpha, call continue; if transparent.
+                                
+                                visible = false;
+                                break;
+                            }
+                        }
+
+                        if (visible) {
+                            // Evaluate BRDF
+                            vec3 f = evalBRDF(N, V, L, albedo, metallic, roughness);
+
+                            // p_omega for light sampling
+                            float p_omega_light = areaPdfToSolidAnglePdf(pA, lightNormal, surfPos, pOnLight);
+
+                            // pdf if sampled by our BSDF sampler (same policy as the path sampler below)
+                            float chooseSpec = clamp(metallic + (1.0 - roughness) * 0.5, 0.0, 1.0);
+                            float pdf_spec = pdfGGX(N, V, L, roughness);
+                            float pdf_diff = pdfCosineHemisphere(max(dot(N, L), 0.0));
+                            float pdf_bsdf = max(chooseSpec * pdf_spec + (1.0 - chooseSpec) * pdf_diff, 1e-6);
+
+                            // MIS weight (power heuristic beta=2)
+                            float w = (p_omega_light * p_omega_light) / (p_omega_light * p_omega_light + pdf_bsdf * pdf_bsdf);
+
+                            // Geometry term
+                            float G = (NdotL * Nl_dot) / dist2;
+
+                            // Emitted radiance at that surface point
+                            vec3 Le = ET.emission; // CPU must store emission as radiance
+
+                            // Contribution: throughput * f * (Le * G / pA) * w
+                            vec3 contrib = throughput * f * (Le * (G / max(pA, 1e-12))) * w;
+                            radiance += contrib;
+                        }
+                    }
+                }
+            }
+
+            // ----------------------- BSDF sampling -----------------------
             // Sample diffuse or specular
             float chooseSpec = rand(seed);
             vec3 Lsample;
@@ -118,12 +289,12 @@ void main()
                 throughput /= p;
             }
             if (max(throughput.r, max(throughput.g, throughput.b)) < 1e-4) break;
-        }
+        } // end path loop
 
         sampleAccum += radiance;
-    }
+    } // spp loop
 
-    sampleAccum /= float(maxSamples); // avg this frame’s spp
+    sampleAccum /= float(maxSamples); // avg this frame's spp
 
     // --- Temporal accumulation (keep in linear) ---
     vec4 prev = imageLoad(accumImage, pix);

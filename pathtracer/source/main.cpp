@@ -3,6 +3,7 @@
 #include "core/texture.h"
 #include "core/accel.h"
 #include "math/math_utils.h"
+#include "math/mat4.h"
 #include "render/camera.h"
 #include "render/model_loader.h"
 
@@ -21,17 +22,23 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 ///////////// MODEL LOADER /////////////
 
-std::vector<std::string> MODELS_TO_LOAD = {
-	"sponza_lights/scene.gltf",
-	"sponza_lights/NewSponza_4_Combined_glTF.gltf",
-	"sponza_main/NewSponza_Main_glTF_003.gltf",
-	"helmet/DamagedHelmet.gltf"
+struct SceneObject {
+    std::string modelPath;
+    Mat4 transform;
 };
 
-//std::string MODEL_TO_LOAD = "sponza_main/NewSponza_Main_glTF_003.gltf";
-std::string MODEL_TO_LOAD1 = "sponza_lights/scene.gltf";
-std::string MODEL_TO_LOAD2 = "sponza_lights/NewSponza_4_Combined_glTF.gltf";
-//std::string MODEL_TO_LOAD = "helmet/DamagedHelmet.gltf";
+std::vector<SceneObject> MODELS_TO_LOAD = {
+    //{"chess/ABeautifulGame.gltf", Mat4::identity()},
+    //{"porsche/scene.gltf", Mat4::identity()},
+    //{"FLY/FlightHelmet.gltf", Mat4::identity()},
+    //{"lantern/Lantern.gltf", Mat4::scale(Vec3(0.1))},
+    //{"env/EnvironmentTest.gltf", Mat4::scale(Vec3(0.8))},
+    //{"sponza_lights/scene.gltf", Mat4::identity()},
+    {"bath/scene.gltf", Mat4::identity()},
+    //{"sponza_lights/NewSponza_4_Combined_glTF.gltf", Mat4::identity()},
+    //{"sponza_main/NewSponza_Main_glTF_003.gltf", Mat4::identity()},
+    //{"helmet/DamagedHelmet.gltf", Mat4::identity()},
+};
 
 ////////////////////////////////////////
 
@@ -59,6 +66,14 @@ struct PushConstants {
     Vec3 cameraRight;
 };
 
+struct EmissiveTriGPU {
+    alignas(16) float v0[4];       // xyz, pad
+    alignas(16) float v1[4];
+    alignas(16) float v2[4];
+    alignas(16) float normal[4];   // xyz, pad
+    alignas(16) float emission[4]; // rgb radiance (linear), pad
+    alignas(16) float area[4];     // area in .x, rest pad
+};
 
 int main() {
     // 1. Initialize GLFW and create window
@@ -110,47 +125,244 @@ int main() {
         vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst
     };
 
-    // Load model
-    std::vector<Vertex> vertices;
-    std::vector<uint32_t> indices;
-    std::vector<Material> materials;
-    std::vector<uint32_t> faceMaterialIndices;
-    std::vector<std::string> textureFiles;
-    std::string modelPath = "../assets/models/" + MODEL_TO_LOAD1;
+    Image accumImage{
+        context,
+        {WIDTH, HEIGHT},
+        vk::Format::eB8G8R8A8Unorm,
+        vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst
+    };
 
-    std::cout << "Loading model: " << modelPath << std::endl;
-    loadFromFile(vertices, indices, materials, faceMaterialIndices, textureFiles, modelPath);
+    std::vector<Vertex> sceneVertices;
+    std::vector<uint32_t> sceneIndices;
+    std::vector<Material> sceneMaterials;
+    std::vector<uint32_t> sceneFaceMaterialIndices;
+    std::vector<std::string> sceneTextureFiles;
+    std::unordered_map<std::string, int> textureIndexMap; // To de-duplicate textures across files
 
-    // Model loading validation
-    if (vertices.empty() || indices.empty()) {
-        throw std::runtime_error("No vertices or indices loaded from model");
+    // Keep track of offsets as we load each model
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0; // Not strictly needed for appending, but good for clarity
+    uint32_t materialOffset = 0;
+
+    std::cout << "Loading scene..." << std::endl;
+
+    // 3. Loop through and load each object
+    for (const auto& object : MODELS_TO_LOAD) {
+        // Use temporary vectors for each model load
+        std::vector<Vertex> tempVertices;
+        std::vector<uint32_t> tempIndices;
+        std::vector<Material> tempMaterials;
+        std::vector<uint32_t> tempFaceMaterialIndices;
+        std::vector<std::string> tempTextureFiles;
+
+        std::string fullPath = "../assets/models/" + object.modelPath;
+        loadFromFile(tempVertices, tempIndices, tempMaterials, tempFaceMaterialIndices, tempTextureFiles, fullPath);
+
+        // --- Apply Transformation ---
+        Mat4 transform = object.transform;
+        Mat3 normalTransform = transform.toMat3().inverse().transpose(); // For normals
+        for (auto& vertex : tempVertices) {
+            vertex.position = transform.transformPoint(vertex.position);
+            vertex.normal = normalTransform * vertex.normal;
+            // Tangent should also be transformed if used for lighting
+            if (vertex.tangent != Vec3(0.0f, 0.0f, 0.0f)) {
+                vertex.tangent = normalTransform * vertex.tangent;
+            }
+        }
+
+        // --- Append and Offset Data ---
+        for (const auto& index : tempIndices) {
+            sceneIndices.push_back(vertexOffset + index);
+        }
+        for (const auto& matIndex : tempFaceMaterialIndices) {
+            sceneFaceMaterialIndices.push_back(materialOffset + matIndex);
+        }
+
+        // De-duplicate and append textures
+        for (auto& material : tempMaterials) {
+            if (material.diffuseTextureID != -1) {
+                const std::string& path = tempTextureFiles[material.diffuseTextureID];
+                if (textureIndexMap.find(path) == textureIndexMap.end()) {
+                    textureIndexMap[path] = sceneTextureFiles.size();
+                    sceneTextureFiles.push_back(path);
+                }
+                material.diffuseTextureID = textureIndexMap[path];
+            }
+            // Repeat for metalRoughTextureID and normalTextureID
+            if (material.metalRoughTextureID != -1) {
+                const std::string& path = tempTextureFiles[material.metalRoughTextureID];
+                if (textureIndexMap.find(path) == textureIndexMap.end()) {
+                    textureIndexMap[path] = sceneTextureFiles.size();
+                    sceneTextureFiles.push_back(path);
+                }
+                material.metalRoughTextureID = textureIndexMap[path];
+            }
+            if (material.normalTextureID != -1) {
+                const std::string& path = tempTextureFiles[material.normalTextureID];
+                if (textureIndexMap.find(path) == textureIndexMap.end()) {
+                    textureIndexMap[path] = sceneTextureFiles.size();
+                    sceneTextureFiles.push_back(path);
+                }
+                material.normalTextureID = textureIndexMap[path];
+            }
+            /*if (material.emissiveTextureID != -1) {
+                const std::string& path = tempTextureFiles[material.emissiveTextureID];
+                if (textureIndexMap.find(path) == textureIndexMap.end()) {
+                    textureIndexMap[path] = sceneTextureFiles.size();
+                    sceneTextureFiles.push_back(path);
+                }
+                material.emissiveTextureID = textureIndexMap[path];
+            }
+            if (material.occlusionTextureID != -1) {
+                const std::string& path = tempTextureFiles[material.occlusionTextureID];
+                if (textureIndexMap.find(path) == textureIndexMap.end()) {
+                    textureIndexMap[path] = sceneTextureFiles.size();
+                    sceneTextureFiles.push_back(path);
+                }
+                material.occlusionTextureID = textureIndexMap[path];
+            }*/
+        }
+
+        sceneVertices.insert(sceneVertices.end(), tempVertices.begin(), tempVertices.end());
+        sceneMaterials.insert(sceneMaterials.end(), tempMaterials.begin(), tempMaterials.end());
+
+        // Update offsets for the next model
+        vertexOffset += static_cast<uint32_t>(tempVertices.size());
+        indexOffset += static_cast<uint32_t>(tempIndices.size());
+        materialOffset += static_cast<uint32_t>(tempMaterials.size());
+
+        std::cout << " - Loaded " << object.modelPath << std::endl;
+    }
+
+    // 4. Create GPU buffers from the final, concatenated scene data
+    // (Replace old vectors with the 'scene' vectors)
+    if (sceneVertices.empty() || sceneIndices.empty()) {
+        throw std::runtime_error("No vertices or indices loaded for the scene");
     }
 
     std::cout
-        << vertices.size() << " vertices" << std::endl
-        << indices.size() << " indices" << std::endl
-        << materials.size() << " unique materials, " << std::endl
-        << textureFiles.size() << " textures" << std::endl;
+        << sceneVertices.size() << " vertices" << std::endl
+        << sceneIndices.size() << " indices" << std::endl
+        << sceneMaterials.size() << " unique materials, " << std::endl
+        << sceneTextureFiles.size() << " textures" << std::endl;
 
     // Load textures
     std::vector<Texture> textures;
-    textures.reserve(textureFiles.size());
-    for (const auto& filePath : textureFiles) {
+    textures.reserve(sceneTextureFiles.size());
+    for (const auto& filePath : sceneTextureFiles) {
         textures.push_back(createTexture(context, filePath));
     }
 
-    Buffer vertexBuffer{ context, Buffer::Type::AccelInput, sizeof(Vertex) * vertices.size(), vertices.data() };
-    Buffer indexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * indices.size(), indices.data() };
-    Buffer materialBuffer{ context, Buffer::Type::AccelInput, sizeof(Material) * materials.size(), materials.data() };
-    Buffer faceMaterialIndexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * faceMaterialIndices.size(), faceMaterialIndices.data() };
+    Buffer vertexBuffer{ context, Buffer::Type::AccelInput, sizeof(Vertex) * sceneVertices.size(), sceneVertices.data() };
+    Buffer indexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * sceneIndices.size(), sceneIndices.data() };
+    Buffer materialBuffer{ context, Buffer::Type::AccelInput, sizeof(Material) * sceneMaterials.size(), sceneMaterials.data() };
+    Buffer faceMaterialIndexBuffer{ context, Buffer::Type::AccelInput, sizeof(uint32_t) * sceneFaceMaterialIndices.size(), sceneFaceMaterialIndices.data() };
 
+    // 5. Build emissive triangle list and CDF
+    std::vector<EmissiveTriGPU> emissiveTris;
+    emissiveTris.reserve(256);
 
-    // Create bottom level accel struct
+    const uint32_t primitiveCount = static_cast<uint32_t>(sceneIndices.size() / 3);
+    for (uint32_t prim = 0; prim < primitiveCount; ++prim) {
+        uint32_t i0 = sceneIndices[3 * prim + 0];
+        uint32_t i1 = sceneIndices[3 * prim + 1];
+        uint32_t i2 = sceneIndices[3 * prim + 2];
+
+        Vec3 p0 = sceneVertices[i0].position;
+        Vec3 p1 = sceneVertices[i1].position;
+        Vec3 p2 = sceneVertices[i2].position;
+
+        // face->material index
+        uint32_t matIdx = sceneFaceMaterialIndices[prim];
+        if (matIdx >= sceneMaterials.size()) continue;
+        Material mat = sceneMaterials[matIdx];
+
+        // Compute per-triangle emission. We use material.emission * material.albedo (component-wise)
+        // You can change this to include emissive textures averaging later.
+        Vec3 triEmission = { mat.emission.x * mat.albedo.x,
+                             mat.emission.y * mat.albedo.y,
+                             mat.emission.z * mat.albedo.z };
+
+        // luminance check
+        float lum = 0.2126f * triEmission.x + 0.7152f * triEmission.y + 0.0722f * triEmission.z;
+        if (lum <= 1e-6f) continue;
+
+        // area and normal
+        Vec3 e1 = p1 - p0;
+        Vec3 e2 = p2 - p0;
+        Vec3 n = cross(e1, e2);
+        float area = 0.5f * n.length();
+        if (area <= 1e-9f) continue;
+        n = normalize(n);
+
+        EmissiveTriGPU et{};
+        et.v0[0] = p0.x; et.v0[1] = p0.y; et.v0[2] = p0.z; et.v0[3] = 0.0f;
+        et.v1[0] = p1.x; et.v1[1] = p1.y; et.v1[2] = p1.z; et.v1[3] = 0.0f;
+        et.v2[0] = p2.x; et.v2[1] = p2.y; et.v2[2] = p2.z; et.v2[3] = 0.0f;
+        et.normal[0] = n.x; et.normal[1] = n.y; et.normal[2] = n.z; et.normal[3] = 0.0f;
+        et.emission[0] = triEmission.x; et.emission[1] = triEmission.y; et.emission[2] = triEmission.z; et.emission[3] = 0.0f;
+        et.area[0] = area; et.area[1] = et.area[2] = et.area[3] = 0.0f;
+
+        emissiveTris.push_back(et);
+    }
+
+    // Build CDF (weight = area * luminance)
+    std::vector<float> emissiveCdf;
+    emissiveCdf.reserve(emissiveTris.size());
+    float accum = 0.0f;
+    for (size_t i = 0; i < emissiveTris.size(); ++i) {
+        const EmissiveTriGPU& et = emissiveTris[i];
+        float lum = 0.2126f * et.emission[0] + 0.7152f * et.emission[1] + 0.0722f * et.emission[2];
+        float w = std::max(1e-6f, lum) * std::max(1e-9f, et.area[0]);
+        accum += w;
+        emissiveCdf.push_back(accum);
+    }
+
+    if (accum > 0.0f) {
+        // normalize CDF to [0,1]
+        for (auto& v : emissiveCdf) v /= accum;
+    }
+
+    // Create GPU buffers (safe even if there are no emissives)
+    size_t emissiveTriCount = emissiveTris.empty() ? 1 : emissiveTris.size();
+    size_t emissiveCdfCount = emissiveCdf.empty() ? 1 : emissiveCdf.size();
+
+    // Dummy data for empty case
+    EmissiveTriGPU dummyTri{};
+    float dummyCdf = 1.0f;
+
+    Buffer emissiveBuffer{
+        context,
+        Buffer::Type::AccelInput,
+        sizeof(EmissiveTriGPU) * emissiveTriCount,
+        emissiveTris.empty() ? &dummyTri : emissiveTris.data()
+    };
+
+    Buffer emissiveCdfBuffer{
+        context,
+        Buffer::Type::AccelInput,
+        sizeof(float) * emissiveCdfCount,
+        emissiveCdf.empty() ? &dummyCdf : emissiveCdf.data()
+    };
+
+    // light count uniform
+    int lightCountInt = static_cast<int>(emissiveTris.size());
+    Buffer lightCountBuffer{
+        context,
+        Buffer::Type::AccelInput,
+        sizeof(int),
+        &lightCountInt
+    };
+
+    // debug output
+    std::cout << "Emissive triangles: " << emissiveTris.size() << ", CDF size: " << emissiveCdf.size() << std::endl;
+
+    // 6. Build a single BLAS for the whole scene
     vk::AccelerationStructureGeometryTrianglesDataKHR triangleData;
     triangleData.setVertexFormat(vk::Format::eR32G32B32Sfloat);
     triangleData.setVertexData(vertexBuffer.deviceAddress);
     triangleData.setVertexStride(sizeof(Vertex));
-    triangleData.setMaxVertex(static_cast<uint32_t>(vertices.size()));
+    triangleData.setMaxVertex(static_cast<uint32_t>(sceneVertices.size()));
     triangleData.setIndexType(vk::IndexType::eUint32);
     triangleData.setIndexData(indexBuffer.deviceAddress);
 
@@ -159,11 +371,10 @@ int main() {
     triangleGeometry.setGeometry({ triangleData });
     triangleGeometry.setFlags(vk::GeometryFlagBitsKHR::eOpaque);
 
-    const auto primitiveCount = static_cast<uint32_t>(indices.size() / 3);
-
     Accel bottomAccel{ context, triangleGeometry, primitiveCount, vk::AccelerationStructureTypeKHR::eBottomLevel };
 
-    // Create top level accel struct
+    // 7. Build a TLAS with one instance pointing to the scene BLAS
+    // (The transform is identity because we already applied it to the vertices)
     vk::TransformMatrixKHR transformMatrix = std::array{
         std::array{1.0f, 0.0f, 0.0f, 0.0f},
         std::array{0.0f, 1.0f, 0.0f, 0.0f},
@@ -175,15 +386,6 @@ int main() {
     accelInstance.setMask(0xFF);
     accelInstance.setAccelerationStructureReference(bottomAccel.buffer.deviceAddress);
     accelInstance.setFlags(vk::GeometryInstanceFlagBitsKHR::eTriangleFacingCullDisable);
-
-    // Acceleration structure validation
-    if (bottomAccel.buffer.deviceAddress == 0) {
-        throw std::runtime_error("BLAS device address is zero");
-    }
-
-    if (accelInstance.accelerationStructureReference == 0) {
-        throw std::runtime_error("Instance acceleration structure reference is zero");
-    }
 
     Buffer instancesBuffer{ context, Buffer::Type::AccelInput, sizeof(vk::AccelerationStructureInstanceKHR), &accelInstance };
 
@@ -238,12 +440,16 @@ int main() {
     // create ray tracing pipeline
     std::vector<vk::DescriptorSetLayoutBinding> bindings{
         {0, vk::DescriptorType::eAccelerationStructureKHR, 1, vk::ShaderStageFlagBits::eRaygenKHR},             // 0 = TLAS
-        {1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eRaygenKHR},                         // 1 = Storage image
-        {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 2 = Vertices
-        {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 3 = Indices
-        {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 4 = Materials
-        {5, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 5 = Face Material Indices
-        {6, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // 6 = Textures
+        {1, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eRaygenKHR},                         // 1 = accumImage (rgba32f)
+        {2, vk::DescriptorType::eStorageImage, 1, vk::ShaderStageFlagBits::eRaygenKHR},                         // 2 = outputImage (rgba8)
+        {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 3 = Vertices
+        {4, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 4 = Indices
+        {5, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 5 = Materials
+        {6, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eClosestHitKHR},                    // 6 = Face Material Indices
+        {7, vk::DescriptorType::eCombinedImageSampler, textureCount, vk::ShaderStageFlagBits::eClosestHitKHR},  // 7 = Textures
+        {8, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eRaygenKHR},                        // 8 = EmissiveTris SSBO
+        {9, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eRaygenKHR},                        // 9 = Emissive CDF SSBO (float[])
+        {10, vk::DescriptorType::eUniformBuffer, 1, vk::ShaderStageFlagBits::eRaygenKHR},                       // 10 = Light count UBO
     };
 
     // Create desc set layout
@@ -356,7 +562,7 @@ int main() {
 
     // Create the descriptor writes
     std::vector<vk::WriteDescriptorSet> writes;
-    writes.resize(7);
+    writes.resize(11);
 
     // 0: TLAS
     writes[0].setDstSet(*descSet);
@@ -365,47 +571,75 @@ int main() {
     writes[0].setDescriptorType(vk::DescriptorType::eAccelerationStructureKHR);
     writes[0].setPNext(&topAccel.descAccelInfo);
 
-    // 1: storage image
+    // 1: accumImage (32-bit float)
     writes[1].setDstSet(*descSet);
     writes[1].setDstBinding(1);
     writes[1].setDescriptorCount(1);
     writes[1].setDescriptorType(vk::DescriptorType::eStorageImage);
-    writes[1].setImageInfo(outputImage.descImageInfo);
+    writes[1].setImageInfo(accumImage.descImageInfo);
 
-    // 2: vertices buffer
+    // 2: outputImage (8-bit unorm)
     writes[2].setDstSet(*descSet);
     writes[2].setDstBinding(2);
     writes[2].setDescriptorCount(1);
-    writes[2].setDescriptorType(vk::DescriptorType::eStorageBuffer);
-    writes[2].setBufferInfo(vertexBuffer.descBufferInfo);
+    writes[2].setDescriptorType(vk::DescriptorType::eStorageImage);
+    writes[2].setImageInfo(outputImage.descImageInfo);
 
-    // 3: indices buffer
+    // 3: vertices buffer
     writes[3].setDstSet(*descSet);
     writes[3].setDstBinding(3);
     writes[3].setDescriptorCount(1);
     writes[3].setDescriptorType(vk::DescriptorType::eStorageBuffer);
-    writes[3].setBufferInfo(indexBuffer.descBufferInfo);
+    writes[3].setBufferInfo(vertexBuffer.descBufferInfo);
 
-    // 4: materials buffer
+    // 4: indices buffer
     writes[4].setDstSet(*descSet);
     writes[4].setDstBinding(4);
     writes[4].setDescriptorCount(1);
     writes[4].setDescriptorType(vk::DescriptorType::eStorageBuffer);
-    writes[4].setBufferInfo(materialBuffer.descBufferInfo);
+    writes[4].setBufferInfo(indexBuffer.descBufferInfo);
 
-    // 5: face material indices buffer
+    // 5: materials buffer
     writes[5].setDstSet(*descSet);
     writes[5].setDstBinding(5);
     writes[5].setDescriptorCount(1);
     writes[5].setDescriptorType(vk::DescriptorType::eStorageBuffer);
-    writes[5].setBufferInfo(faceMaterialIndexBuffer.descBufferInfo);
+    writes[5].setBufferInfo(materialBuffer.descBufferInfo);
 
-    // 6: textures array
+    // 6: face material indices buffer
     writes[6].setDstSet(*descSet);
     writes[6].setDstBinding(6);
-    writes[6].setDescriptorCount(textureCount);
-    writes[6].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
-    writes[6].setImageInfo(imageInfos);
+    writes[6].setDescriptorCount(1);
+    writes[6].setDescriptorType(vk::DescriptorType::eStorageBuffer);
+    writes[6].setBufferInfo(faceMaterialIndexBuffer.descBufferInfo);
+
+    // 7: textures array
+    writes[7].setDstSet(*descSet);
+    writes[7].setDstBinding(7);
+    writes[7].setDescriptorCount(textureCount);
+    writes[7].setDescriptorType(vk::DescriptorType::eCombinedImageSampler);
+    writes[7].setImageInfo(imageInfos);
+
+    // 8: emissive triangles SSBO
+    writes[8].setDstSet(*descSet);
+    writes[8].setDstBinding(8);
+    writes[8].setDescriptorCount(1);
+    writes[8].setDescriptorType(vk::DescriptorType::eStorageBuffer);
+    writes[8].setBufferInfo(emissiveBuffer.descBufferInfo);
+
+    // 9: emissive CDF SSBO (float[])
+    writes[9].setDstSet(*descSet);
+    writes[9].setDstBinding(9);
+    writes[9].setDescriptorCount(1);
+    writes[9].setDescriptorType(vk::DescriptorType::eStorageBuffer);
+    writes[9].setBufferInfo(emissiveCdfBuffer.descBufferInfo);
+
+    // 10: lightCount uniform buffer
+    writes[10].setDstSet(*descSet);
+    writes[10].setDstBinding(10);
+    writes[10].setDescriptorCount(1);
+    writes[10].setDescriptorType(vk::DescriptorType::eUniformBuffer);
+    writes[10].setBufferInfo(lightCountBuffer.descBufferInfo);
 
     // Descriptor set validation
     for (auto& write : writes) {
@@ -519,6 +753,11 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
 void processInput(GLFWwindow* window, float deltaTime) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
+
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+        camera.processKeyboard("SHIFT_DOWN", deltaTime);
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_RELEASE)
+        camera.processKeyboard("SHIFT_UP", deltaTime);
 
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
         camera.processKeyboard("FORWARD", deltaTime);

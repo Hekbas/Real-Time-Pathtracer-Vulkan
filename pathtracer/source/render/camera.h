@@ -1,5 +1,5 @@
 #pragma once
-#include "../math/Vec3.h"
+#include "math/Vec3.h"
 #include <string>
 
 struct Camera {
@@ -11,7 +11,7 @@ struct Camera {
 
     float yaw = 0.0f;
     float pitch = 0.0f;
-    float speed = 10.0;
+    float speed = 8.0;
     float sensitivity = 0.1f;
 
     void updateCameraVectors();

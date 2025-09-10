@@ -16,6 +16,9 @@ void Camera::updateCameraVectors() {
 }
 
 void Camera::processKeyboard(const std::string& direction, float deltaTime) {
+	/*if (direction == "SHIFT_DOWN") speed *= 2;
+	if (direction == "SHIFT_UP") speed /= 2;*/
+
     float velocity = speed * deltaTime;
     if (direction == "FORWARD")  position += front * velocity;
     if (direction == "BACKWARD") position -= front * velocity;
